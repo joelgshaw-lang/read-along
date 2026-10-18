@@ -12,6 +12,7 @@ let paraEls = [];         // paragraph elements, same order as book.paras
 let cur = -1;             // paragraph being read
 let follow = true;        // keep the reading paragraph in view
 let sleep = { mode: 0, at: 0, chapterEnd: 0 };
+let pending = null;       // position to jump to once the audio has loaded (iPhones load on first play)
 
 /* ---------------------------------------------------------------- storage */
 
@@ -49,6 +50,15 @@ const pref = {
 };
 
 /* ---------------------------------------------------------------- helpers */
+
+const pos = () => (pending !== null ? pending : audio.currentTime);
+function setPos(t) {
+  if (audio.readyState >= 1) { audio.currentTime = t; pending = null; } else pending = t;
+}
+audio.addEventListener('loadedmetadata', () => {
+  if (pending !== null) { audio.currentTime = pending; pending = null; }
+  if (book) onTime(true);
+});
 
 function fmt(sec) {
   sec = Math.max(0, Math.floor(sec || 0));
@@ -120,7 +130,7 @@ async function importFile(file) {
     const len = Number(head.getBigUint64(7));
     const meta = JSON.parse(await file.slice(15, 15 + len).text());
     const blob = file.slice(15 + len, file.size, 'audio/mp4');
-    meta.duration = meta.paras.length ? await audioDuration(blob) : 0;
+    meta.duration = (await audioDuration(blob)) || (meta.paras.length ? meta.paras[meta.paras.length - 1].s + 30 : 0);
     meta.added = Date.now();
     await put('audio', blob, meta.id);
     await put('books', meta);
@@ -140,6 +150,7 @@ function audioDuration(blob) {
     a.preload = 'metadata'; a.src = url;
     a.onloadedmetadata = () => { ok(a.duration); URL.revokeObjectURL(url); };
     a.onerror = () => ok(0);
+    setTimeout(() => ok(0), 4000);   // iPhones may not load audio until play is pressed
   });
 }
 
@@ -160,9 +171,8 @@ async function openBook(id) {
   $('#library').classList.add('hidden');
   $('#reader').classList.remove('hidden');
   updateSpeed();
-  const pos = pref.get('pos:' + id, 0);
-  await new Promise((ok) => { if (audio.readyState >= 1) ok(); else audio.addEventListener('loadedmetadata', ok, { once: true }); });
-  audio.currentTime = pos;
+  pending = null;
+  setPos(pref.get('pos:' + id, 0));
   follow = true;
   onTime(true);
   busy();
@@ -210,7 +220,7 @@ function setCurrent(i) {
 let lastSave = 0, lastChapter = -1;
 function onTime(force) {
   if (!book) return;
-  const t = audio.currentTime;
+  const t = pos();
   setCurrent(findAt(book.paras, t, 's'));
   const ci = chapterAt(t);
   const start = book.chapters[ci].start, end = chapterEnd(ci);
@@ -228,10 +238,10 @@ function onTime(force) {
     try { navigator.mediaSession.setPositionState({ duration: audio.duration, position: Math.min(t, audio.duration), playbackRate: audio.playbackRate }); } catch {}
   }
 }
-function savePos() { if (book) { pref.set('pos:' + book.id, audio.currentTime); lastSave = Date.now(); } }
+function savePos() { if (book && (audio.readyState >= 1 || pending !== null)) { pref.set('pos:' + book.id, pos()); lastSave = Date.now(); } }
 
 function seekTo(t, play) {
-  audio.currentTime = Math.max(0, Math.min(t, (audio.duration || t) - 0.1));
+  setPos(Math.max(0, Math.min(t, (audio.duration || book.duration || t) - 0.1)));
   follow = true; $('#followBtn').classList.add('hidden');
   onTime(true);
   if (play) audio.play();
@@ -249,18 +259,18 @@ function updateSpeed() { $('#speedBtn').textContent = audio.playbackRate + '×';
 let seeking = false;
 $('#seek').addEventListener('input', () => {
   seeking = true;
-  const ci = chapterAt(audio.currentTime), start = book.chapters[ci].start, end = chapterEnd(ci);
+  const ci = chapterAt(pos()), start = book.chapters[ci].start, end = chapterEnd(ci);
   $('#tNow').textContent = fmt(($('#seek').value / 1000) * (end - start));
 });
 $('#seek').addEventListener('change', () => {
-  const ci = chapterAt(audio.currentTime), start = book.chapters[ci].start, end = chapterEnd(ci);
+  const ci = chapterAt(pos()), start = book.chapters[ci].start, end = chapterEnd(ci);
   seeking = false;
   seekTo(start + ($('#seek').value / 1000) * (end - start));
 });
 
 $('#playBtn').onclick = () => { unlockChime(); togglePlay(); };
-$('#b15').onclick = () => seekTo(audio.currentTime - 15);
-$('#f15').onclick = () => seekTo(audio.currentTime + 15);
+$('#b15').onclick = () => seekTo(pos() - 15);
+$('#f15').onclick = () => seekTo(pos() + 15);
 function setSpeed(r) {
   r = Math.round(Math.max(0.5, Math.min(4, r)) * 100) / 100;
   audio.playbackRate = r; audio.preservesPitch = true; audio.webkitPreservesPitch = true;
@@ -308,7 +318,7 @@ $('#followBtn').onclick = () => {
 function setSleep(mins) {
   sleep.mode = mins;
   sleep.at = mins > 0 ? Date.now() + mins * 60000 : 0;
-  sleep.chapterEnd = mins === -1 ? chapterEnd(chapterAt(audio.currentTime)) : 0;
+  sleep.chapterEnd = mins === -1 ? chapterEnd(chapterAt(pos())) : 0;
   $('#sleepBtn').classList.toggle('on', mins !== 0);
   $('#sleepBtn').innerHTML = `<svg class="icon"><use href="#i-moon"/></svg>` + (mins ? `<small>${mins === -1 ? 'ch.' : mins + 'm'}</small>` : '');
   toast(mins === 0 ? 'Sleep timer off' : mins === -1 ? 'Stopping at the end of this chapter' : `Stopping in ${mins} minutes`);
@@ -319,7 +329,7 @@ function checkSleep(t) {
     audio.pause(); setSleep(0); toast('Sleep timer: paused');
   }
 }
-setInterval(() => book && checkSleep(audio.currentTime), 1000);
+setInterval(() => book && checkSleep(pos()), 1000);
 $('#sleepBtn').onclick = () => openSheet(`<h3>Sleep timer</h3><div class="chips">${SLEEP.map(([l, m]) =>
   `<button class="chip ${sleep.mode === m ? 'on' : ''}" data-m="${m}">${l}</button>`).join('')}</div>
   <p class="tip">Backup for long nights: in the Clock app, set a Timer and choose <b>When Timer Ends → Stop Playing</b>.</p>`,
@@ -340,7 +350,7 @@ async function addHighlight(para, quote, note, source) {
 // AirPods double-press: keep the paragraph you were just listening to.
 async function captureHeard() {
   if (!book) return;
-  const t = audio.currentTime;
+  const t = pos();
   let i = findAt(book.paras, t, 's');
   if (t - book.paras[i].s < 4 && i > 0) i -= 1;   // only just started this one? keep the last
   if (book.paras[i].h && i + 1 < book.paras.length) i += 1;
@@ -464,7 +474,7 @@ function setupMediaSession() {
   set('play', () => audio.play());
   set('pause', () => audio.pause());
   set('nexttrack', () => captureHeard());                          // AirPods double-press
-  set('previoustrack', () => seekTo(audio.currentTime - 15));       // AirPods triple-press
+  set('previoustrack', () => seekTo(pos() - 15));       // AirPods triple-press
   set('seekforward', null);   // keep next/previous (not skip buttons) so the AirPods presses reach us
   set('seekbackward', null);
   set('seekto', (d) => seekTo(d.seekTime));
@@ -472,7 +482,7 @@ function setupMediaSession() {
 }
 function updateMediaMeta() {
   if (!('mediaSession' in navigator) || !book) return;
-  const ci = chapterAt(audio.currentTime);
+  const ci = chapterAt(pos());
   try {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: book.chapters[ci].title, artist: book.title, album: book.author || 'Read Along',
@@ -493,7 +503,7 @@ function closeSheet() { $('#sheet').classList.add('hidden'); $('#scrim').classLi
 $('#scrim').onclick = closeSheet;
 
 $('#tocBtn').onclick = () => {
-  const ci = chapterAt(audio.currentTime);
+  const ci = chapterAt(pos());
   openSheet(`<h3>Contents</h3>${book.chapters.map((c, i) =>
     `<button class="item ${i === ci ? 'cur' : ''}" data-c="${i}">${esc(c.title)}<small>${fmt(c.start)}</small></button>`).join('')}`,
   (s) => {
