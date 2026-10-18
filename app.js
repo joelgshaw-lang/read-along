@@ -12,7 +12,10 @@ let paraEls = [];         // paragraph elements, same order as book.paras
 let cur = -1;             // paragraph being read
 let follow = true;        // keep the reading paragraph in view
 let sleep = { mode: 0, at: 0, chapterEnd: 0 };
-let pending = null;       // position to jump to once the audio has loaded (iPhones load on first play)
+let pending = null;
+const wordHL = (window.CSS && CSS.highlights && window.Highlight) ? new Highlight() : null;
+if (wordHL) CSS.highlights.set('word', wordHL);
+let wordPara = -1, wordIdx = -1, wordRanges = [];       // position to jump to once the audio has loaded (iPhones load on first play)
 
 /* ---------------------------------------------------------------- storage */
 
@@ -164,6 +167,7 @@ async function openBook(id) {
   audio.src = URL.createObjectURL(blob);
   audio.playbackRate = pref.get('speed', 1); audio.preservesPitch = true;
   pref.set('opened:' + id, Date.now());
+  pref.set('last', id);
   $('#bookTitle').textContent = book.title;
   document.title = book.title;
   renderText();
@@ -174,6 +178,7 @@ async function openBook(id) {
   pending = null;
   setPos(pref.get('pos:' + id, 0));
   follow = true;
+  setCurrent(findAt(book.paras, pos(), 's'), true);   // jump straight to where you were
   onTime(true);
   busy();
   setupMediaSession();
@@ -203,19 +208,61 @@ async function renderMarks() {
     }
     if (el.innerHTML !== html) el.innerHTML = html;
   });
+  wordIdx = -1; wordPara = -1; updateWord();
 }
 
-function setCurrent(i) {
+function setCurrent(i, instant) {
   if (i === cur) return;
+  if (wordHL) { wordHL.clear(); wordIdx = -1; }
   if (paraEls[cur]) paraEls[cur].classList.remove('now');
   cur = i;
   const el = paraEls[i];
   if (!el) return;
   el.classList.add('now');
   if (follow && !$('#reader').classList.contains('hidden')) {
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.scrollIntoView({ block: 'center', behavior: instant ? 'auto' : 'smooth' });
   }
 }
+
+// Character positions of each word in a paragraph.
+function wordSpans(text) {
+  const out = []; const re = /\S+/g; let m;
+  while ((m = re.exec(text))) out.push([m.index, m.index + m[0].length]);
+  return out;
+}
+// A Range over characters a..b of an element's text, across any <mark> tags.
+function textRange(el, a, b) {
+  const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const r = document.createRange(); let n, at = 0, started = false;
+  while ((n = walk.nextNode())) {
+    const len = n.nodeValue.length;
+    if (!started && a < at + len) { r.setStart(n, a - at); started = true; }
+    if (started && b <= at + len) { r.setEnd(n, b - at); return r; }
+    at += len;
+  }
+  return null;
+}
+function updateWord() {
+  if (!wordHL || !book || cur < 0) return;
+  const p = book.paras[cur];
+  if (!p.w) return;
+  if (wordPara !== cur) { wordPara = cur; wordRanges = wordSpans(p.t); wordIdx = -1; }
+  const rel = (pos() - p.s) * 100;
+  let lo = 0, hi = p.w.length - 1, k = 0;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (p.w[mid] <= rel + 4) { k = mid; lo = mid + 1; } else hi = mid - 1; }
+  if (k === wordIdx || !wordRanges[k]) return;
+  wordIdx = k;
+  const r = textRange(paraEls[cur], wordRanges[k][0], wordRanges[k][1]);
+  wordHL.clear();
+  if (r) wordHL.add(r);
+}
+let ticking = false;
+function tick() {
+  if (audio.paused || !book) { ticking = false; return; }
+  if (!document.hidden) updateWord();
+  requestAnimationFrame(tick);
+}
+function startTick() { if (!ticking) { ticking = true; requestAnimationFrame(tick); } }
 
 let lastSave = 0, lastChapter = -1;
 function onTime(force) {
@@ -287,7 +334,7 @@ $('#speedBtn').onclick = function speedSheet() {
   });
 };
 audio.addEventListener('timeupdate', () => onTime(false));
-audio.addEventListener('play', () => { updatePlayIcon(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
+audio.addEventListener('play', () => { updatePlayIcon(); startTick(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
 audio.addEventListener('pause', () => { updatePlayIcon(); savePos(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
 
 // Tap a paragraph to listen from there (but not while selecting text).
@@ -420,7 +467,9 @@ async function showHighlights(tag) {
   const tags = [...new Set(hls.flatMap((h) => (h.note.match(/#[\w-]+/g) || []).map((t) => t.toLowerCase())))];
   const shown = tag ? hls.filter((h) => h.note.toLowerCase().includes(tag)) : hls;
   reopen = () => showHighlights(tag);
-  openSheet(`<h3>Highlights <button id="exportBtn">Export</button></h3>
+  openSheet(`<h3>Highlights <button id="exportBtn">Share</button></h3>
+    ${hls.length ? `<div class="sendbar"><button class="primary" id="nlmBtn">Send to NotebookLM</button></div>
+    <p class="tip" style="margin:0 0 12px">Save it to <b>iCloud Drive › Read Along</b>. Your Mac adds it to NotebookLM within the hour.</p>` : ''}
     ${tags.length ? `<div class="chips"><button class="chip ${!tag ? 'on' : ''}" data-t="">All</button>${tags.map((t) =>
       `<button class="chip ${tag === t ? 'on' : ''}" data-t="${t}">${t}</button>`).join('')}</div>` : ''}
     ${shown.length ? shown.map(hlHTML).join('') : `<p class="tip">No highlights yet. Select text and tap <b>Highlight</b>, or double-press your AirPods while listening to keep what you just heard.</p>`}`,
@@ -428,7 +477,34 @@ async function showHighlights(tag) {
     wireHl(s);
     s.querySelectorAll('.chip').forEach((c) => (c.onclick = () => showHighlights(c.dataset.t)));
     s.querySelector('#exportBtn').onclick = () => exportHighlights(shown);
+    const nlm = s.querySelector('#nlmBtn'); if (nlm) nlm.onclick = () => sendToNotebookLM(hls);
   });
+}
+function highlightsMarkdown(list) {
+  let md = `# Highlights: ${book.title}\n${book.author ? '_' + book.author + '_\n' : ''}`;
+  let chap = '';
+  for (const h of list) {
+    if (h.chapter !== chap) { chap = h.chapter; md += `\n## ${chap}\n`; }
+    md += `\n> ${h.quote}\n`;
+    if (h.note) md += `\nMy note: ${h.note}\n`;
+  }
+  return md;
+}
+// Saves a highlights file (to iCloud Drive > Read Along); the Mac adds it to NotebookLM.
+function sendToNotebookLM(all) {
+  if (!all.length) return toast('No highlights yet');
+  const md = `<!-- readalong ${JSON.stringify({ id: book.id, title: book.title })} -->\n` + highlightsMarkdown(all);
+  const base = book.title.split(/[:(]/)[0].trim().replace(/[\\/:*?"<>|]/g, '') + ' - highlights';
+  let file = new File([md], base + '.md', { type: 'text/markdown' });
+  if (!(navigator.canShare && navigator.canShare({ files: [file] }))) file = new File([md], base + '.txt', { type: 'text/plain' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    navigator.share({ files: [file] }).then(() => toast('Saved. Your Mac adds it to NotebookLM within the hour.'))
+      .catch((e) => { if (e.name !== 'AbortError') download(file); });
+  } else download(file);
+}
+function download(file) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove();
 }
 async function exportHighlights(list) {
   if (!list.length) return toast('No highlights to export');
@@ -537,10 +613,15 @@ $('#setBtn').onclick = function settings() {
 
 /* ---------------------------------------------------------------- start */
 
-$('#backBtn').onclick = showLibrary;
+$('#backBtn').onclick = () => { pref.set('last', null); showLibrary(); };
 $('#addBtn').onclick = () => $('#file').click();
 $('#file').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importFile(f); };
 document.addEventListener('visibilitychange', () => { if (document.hidden) savePos(); });
 applyLook();
-showLibrary();
+(async () => {
+  // Open straight back into the book you were reading.
+  const last = pref.get('last', null);
+  if (last && await get('books', last).catch(() => null)) openBook(last); else showLibrary();
+})();
+window.addEventListener('pagehide', savePos);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
