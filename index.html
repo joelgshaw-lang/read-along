@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Read Along">
+<meta name="theme-color" content="#f6f2ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)">
+<title>Read Along</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #f6f2ea; --surface: #fffdf8; --ink: #24211c; --muted: #6f685c; --line: #e3dccd;
+    --accent: #2f6b5a; --accent-ink: #ffffff; --now: #e4efe9; --mark: #f7e08a; --mark-ink: #24211c;
+    --shadow: 0 6px 24px rgba(40, 32, 20, .12);
+    --text-size: 19px;
+  }
+  :root[data-theme="sepia"] {
+    --bg: #f1e7d0; --surface: #f8f0dc; --ink: #3b2f1e; --muted: #7a6a50; --line: #dccdaa;
+    --now: #e6dcc0; --mark: #f2d77a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]):not([data-theme="sepia"]) {
+      --bg: #161513; --surface: #1f1e1b; --ink: #e9e4da; --muted: #a39b8c; --line: #34312b;
+      --accent: #7cc4ad; --accent-ink: #10201b; --now: #233631; --mark: #6b5a1c; --mark-ink: #f5ecd0;
+      --shadow: 0 6px 24px rgba(0, 0, 0, .5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161513; --surface: #1f1e1b; --ink: #e9e4da; --muted: #a39b8c; --line: #34312b;
+    --accent: #7cc4ad; --accent-ink: #10201b; --now: #233631; --mark: #6b5a1c; --mark-ink: #f5ecd0;
+    --shadow: 0 6px 24px rgba(0, 0, 0, .5);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overscroll-behavior-y: none;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  .hidden { display: none !important; }
+  .icon { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 1.8;
+          stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ---------- top bar ---------- */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 4px;
+    padding: calc(env(safe-area-inset-top) + 6px) 8px 6px;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+  }
+  header .title { flex: 1; min-width: 0; text-align: center; }
+  header .title b { display: block; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header .title small { display: block; color: var(--muted); font-size: 12px;
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tb { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 12px; }
+  .tb:active { background: var(--line); }
+
+  /* ---------- library ---------- */
+  #library main { padding: 16px 16px calc(env(safe-area-inset-bottom) + 24px); max-width: 640px; margin: 0 auto; }
+  #library h1 { font: 700 28px/1.2 ui-serif, Georgia, serif; margin: 8px 0 4px; }
+  #library .lede { color: var(--muted); margin: 0 0 20px; }
+  .book {
+    display: flex; gap: 14px; align-items: center; width: 100%; text-align: left;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px; margin-bottom: 10px;
+  }
+  .book .cover {
+    flex: none; width: 46px; height: 64px; border-radius: 6px; display: grid; place-items: center;
+    background: var(--accent); color: var(--accent-ink); font: 700 20px ui-serif, Georgia, serif;
+  }
+  .book .meta { flex: 1; min-width: 0; }
+  .book .meta b { display: block; font: 600 16px/1.3 ui-serif, Georgia, serif; }
+  .book .meta span { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .bar { height: 4px; border-radius: 2px; background: var(--line); margin-top: 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .add {
+    display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
+    padding: 14px; border-radius: 14px; border: 1.5px dashed var(--line); color: var(--accent); font-weight: 600;
+  }
+  .empty { text-align: center; color: var(--muted); padding: 32px 8px; }
+  .note-small { color: var(--muted); font-size: 13px; text-align: center; margin-top: 18px; }
+
+  /* ---------- reading ---------- */
+  #text {
+    max-width: 680px; margin: 0 auto;
+    padding: 20px 22px calc(env(safe-area-inset-bottom) + 190px);
+    font: var(--text-size)/1.65 ui-serif, "New York", Georgia, serif;
+    -webkit-user-select: text; user-select: text;
+  }
+  #text p { margin: 0 0 .9em; padding: 4px 8px; margin-inline: -8px; border-radius: 8px;
+            transition: background-color .3s; }
+  #text h2 { font: 700 1.15em/1.3 ui-serif, Georgia, serif; margin: 1.8em -8px .7em; padding: 4px 8px;
+             border-radius: 8px; transition: background-color .3s; }
+  #text .now { background: var(--now); }
+  #text mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padding: 0 1px; }
+  #text mark.note::after { content: "✎"; font-size: .7em; vertical-align: super; margin-left: 2px; }
+
+  .follow {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(env(safe-area-inset-bottom) + 150px); z-index: 25;
+    background: var(--accent); color: var(--accent-ink); border-radius: 999px;
+    padding: 9px 16px; font-weight: 600; font-size: 14px; box-shadow: var(--shadow);
+  }
+
+  /* ---------- player ---------- */
+  .player {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    background: var(--surface); border-top: 1px solid var(--line);
+    padding: 10px 16px calc(env(safe-area-inset-bottom) + 10px);
+    box-shadow: 0 -4px 20px rgba(0,0,0,.06);
+  }
+  .player .row { display: flex; align-items: center; justify-content: space-between; max-width: 520px; margin: 0 auto; }
+  .times { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px;
+           max-width: 520px; margin: 0 auto 2px; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; max-width: 520px; display: block; margin: 0 auto 6px; accent-color: var(--accent); }
+  .play { width: 60px; height: 60px; border-radius: 50%; background: var(--accent); color: var(--accent-ink);
+          display: grid; place-items: center; }
+  .play .icon { width: 28px; height: 28px; fill: currentColor; stroke: none; }
+  .pbtn { min-width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; font-size: 14px; font-weight: 600; }
+  .pbtn:active { background: var(--line); }
+  .pbtn.on { color: var(--accent); }
+  .pbtn small { display: block; font-size: 10px; font-weight: 600; line-height: 1; margin-top: -2px; }
+
+  /* ---------- sheets ---------- */
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 40; }
+  .sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 41; max-height: 78vh; overflow: auto;
+    background: var(--surface); border-radius: 18px 18px 0 0; box-shadow: var(--shadow);
+    padding: 8px 16px calc(env(safe-area-inset-bottom) + 18px);
+  }
+  .sheet .grab { width: 40px; height: 5px; border-radius: 3px; background: var(--line); margin: 4px auto 10px; }
+  .sheet h3 { margin: 4px 0 12px; font-size: 18px; display: flex; align-items: center; justify-content: space-between; }
+  .sheet h3 button { color: var(--accent); font-size: 15px; font-weight: 600; }
+  .item { display: block; width: 100%; text-align: left; padding: 12px 4px; border-bottom: 1px solid var(--line); }
+  .item.cur { color: var(--accent); font-weight: 600; }
+  .item small { color: var(--muted); display: block; font-size: 12px; margin-top: 2px; }
+  .hl { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .hl q { display: block; font: 15px/1.5 ui-serif, Georgia, serif; quotes: none; border-left: 3px solid var(--mark); padding-left: 10px; }
+  .hl .n { margin: 6px 0 0 13px; font-size: 14px; }
+  .hl .acts { display: flex; gap: 16px; margin: 8px 0 0 13px; font-size: 13px; color: var(--accent); font-weight: 600; }
+  .hl .acts .del { color: #b2463c; }
+  .hl .when { color: var(--muted); font-size: 12px; margin: 6px 0 0 13px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .chip { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); font-size: 14px; }
+  .chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .setrow { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .stepper { display: flex; gap: 8px; }
+  .stepper button { width: 44px; height: 38px; border-radius: 10px; border: 1px solid var(--line); font-weight: 700; }
+  .tip { color: var(--muted); font-size: 13px; line-height: 1.5; margin-top: 14px; }
+
+  /* ---------- selection toolbar + toast ---------- */
+  .selbar {
+    position: fixed; z-index: 35; display: flex; gap: 2px; padding: 4px;
+    background: var(--ink); color: var(--bg); border-radius: 12px; box-shadow: var(--shadow);
+  }
+  .selbar button { padding: 10px 14px; font-size: 15px; font-weight: 600; border-radius: 9px; }
+  .toast {
+    position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 64px); transform: translateX(-50%);
+    z-index: 50; background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 12px;
+    font-size: 14px; font-weight: 600; box-shadow: var(--shadow); max-width: 90vw; text-align: center;
+  }
+  .busy { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: rgba(0,0,0,.4); color: #fff; font-weight: 600; text-align: center; padding: 24px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+  <symbol id="i-mark" viewBox="0 0 24 24"><path d="M6 4h12v17l-6-4-6 4z"/></symbol>
+  <symbol id="i-aa" viewBox="0 0 24 24"><path d="M3 18l5-12 5 12M5 14h6M15 18v-5a3 3 0 016 0v5M15 15.5h6"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></symbol>
+  <symbol id="i-back15" viewBox="0 0 24 24"><path d="M4 12a8 8 0 108-8H8M8 1L5 4l3 3"/></symbol>
+  <symbol id="i-fwd15" viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-8-8h4M16 1l3 3-3 3"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+</svg>
+
+<!-- Library -->
+<section id="library">
+  <main>
+    <h1>Read Along</h1>
+    <p class="lede">Your books, read aloud. Everything stays on this phone.</p>
+    <div id="books"></div>
+    <button class="add" id="addBtn"><svg class="icon"><use href="#i-plus"/></svg> Add a book</button>
+    <input type="file" id="file" class="hidden">
+    <p class="note-small" id="storage"></p>
+  </main>
+</section>
+
+<!-- Reader -->
+<section id="reader" class="hidden">
+  <header>
+    <button class="tb" id="backBtn" aria-label="Library"><svg class="icon"><use href="#i-back"/></svg></button>
+    <div class="title"><b id="bookTitle"></b><small id="chapTitle"></small></div>
+    <button class="tb" id="tocBtn" aria-label="Contents"><svg class="icon"><use href="#i-list"/></svg></button>
+    <button class="tb" id="hlBtn" aria-label="Highlights"><svg class="icon"><use href="#i-mark"/></svg></button>
+    <button class="tb" id="setBtn" aria-label="Text settings"><svg class="icon"><use href="#i-aa"/></svg></button>
+  </header>
+  <article id="text"></article>
+  <button class="follow hidden" id="followBtn">Back to where it's reading</button>
+  <div class="player">
+    <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Position in chapter">
+    <div class="times"><span id="tNow">0:00</span><span id="tLeft"></span></div>
+    <div class="row">
+      <button class="pbtn" id="speedBtn" aria-label="Speed">1×</button>
+      <button class="pbtn" id="b15" aria-label="Back 15 seconds"><svg class="icon"><use href="#i-back15"/></svg></button>
+      <button class="play" id="playBtn" aria-label="Play"><svg class="icon"><use href="#i-play" id="playIcon"/></svg></button>
+      <button class="pbtn" id="f15" aria-label="Forward 15 seconds"><svg class="icon"><use href="#i-fwd15"/></svg></button>
+      <button class="pbtn" id="sleepBtn" aria-label="Sleep timer"><svg class="icon"><use href="#i-moon"/></svg></button>
+    </div>
+  </div>
+  <audio id="audio" preload="auto"></audio>
+</section>
+
+<div class="scrim hidden" id="scrim"></div>
+<div class="sheet hidden" id="sheet"></div>
+<div class="selbar hidden" id="selbar">
+  <button id="selHl">Highlight</button>
+  <button id="selNote">Note</button>
+</div>
+<div class="toast hidden" id="toast"></div>
+<div class="busy hidden" id="busy"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
