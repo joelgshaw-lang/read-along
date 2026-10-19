@@ -16,24 +16,24 @@
 <style>
   :root {
     --bg: #f6f2ea; --surface: #fffdf8; --ink: #24211c; --muted: #6f685c; --line: #e3dccd;
-    --accent: #2f6b5a; --accent-ink: #ffffff; --now: #e4efe9; --word: #bcdccf; --mark: #f7e08a; --mark-ink: #24211c;
+    --accent: #2f6b5a; --accent-ink: #ffffff; --now: #e4efe9; --word: #93cbb5; --word-blend: multiply; --pivot: #d0352b; --mark: #f7e08a; --mark-ink: #24211c;
     --shadow: 0 6px 24px rgba(40, 32, 20, .12);
     --text-size: 19px;
   }
   :root[data-theme="sepia"] {
     --bg: #f1e7d0; --surface: #f8f0dc; --ink: #3b2f1e; --muted: #7a6a50; --line: #dccdaa;
-    --now: #e6dcc0; --word: #d3c497; --mark: #f2d77a;
+    --now: #e6dcc0; --word: #dcbd6e; --mark: #f2d77a;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]):not([data-theme="sepia"]) {
       --bg: #161513; --surface: #1f1e1b; --ink: #e9e4da; --muted: #a39b8c; --line: #34312b;
-      --accent: #7cc4ad; --accent-ink: #10201b; --now: #233631; --word: #3d6a5c; --mark: #6b5a1c; --mark-ink: #f5ecd0;
+      --accent: #7cc4ad; --accent-ink: #10201b; --now: #233631; --word: #2c6e5b; --word-blend: screen; --pivot: #ff6b5e; --mark: #6b5a1c; --mark-ink: #f5ecd0;
       --shadow: 0 6px 24px rgba(0, 0, 0, .5);
     }
   }
   :root[data-theme="dark"] {
     --bg: #161513; --surface: #1f1e1b; --ink: #e9e4da; --muted: #a39b8c; --line: #34312b;
-    --accent: #7cc4ad; --accent-ink: #10201b; --now: #233631; --word: #3d6a5c; --mark: #6b5a1c; --mark-ink: #f5ecd0;
+    --accent: #7cc4ad; --accent-ink: #10201b; --now: #233631; --word: #2c6e5b; --word-blend: screen; --pivot: #ff6b5e; --mark: #6b5a1c; --mark-ink: #f5ecd0;
     --shadow: 0 6px 24px rgba(0, 0, 0, .5);
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -101,7 +101,10 @@
   #text h2 { font: 700 1.15em/1.3 ui-serif, Georgia, serif; margin: 1.8em -8px .7em; padding: 4px 8px;
              border-radius: 8px; transition: background-color .3s; }
   #text .now { background: var(--now); }
-  ::highlight(word) { background-color: var(--word); }
+  /* The spoken word: a box laid over the text. Blending keeps the letters crisp in every theme. */
+  .wordbox { position: absolute; z-index: 5; pointer-events: none; border-radius: 5px;
+             background: var(--word); mix-blend-mode: var(--word-blend); transition: top .08s, left .08s, width .08s; }
+  .wordbox.hidden { display: block !important; opacity: 0; }
   #text mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padding: 0 1px; }
   #text mark.note::after { content: "✎"; font-size: .7em; vertical-align: super; margin-left: 2px; }
 
@@ -161,6 +164,64 @@
   .stepper button { width: 44px; height: 38px; border-radius: 10px; border: 1px solid var(--line); font-weight: 700; }
   .tip { color: var(--muted); font-size: 13px; line-height: 1.5; margin-top: 14px; }
 
+  /* ---------- chapter bar (above the player) ---------- */
+  .chapbar { display: flex; align-items: baseline; gap: 8px; width: 100%; max-width: 520px; margin: 0 auto 6px;
+             text-align: left; font-size: 13px; }
+  .chapbar .num { flex: none; color: var(--accent); font-weight: 700; }
+  .chapbar .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  .chapbar .pct { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* ---------- speed reader ---------- */
+  .rsvp {
+    position: fixed; left: 0; right: 0; z-index: 22; background: var(--bg);
+    top: calc(env(safe-area-inset-top) + 57px); bottom: var(--player-h, 170px);
+    display: flex; flex-direction: column; padding: 14px 16px;
+  }
+  .rsvp .chap { text-align: center; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rsvp .stage { flex: 1; display: flex; flex-direction: column; justify-content: center; cursor: pointer; min-height: 140px; }
+  .rsvp .guide { position: relative; height: 14px; max-width: 560px; width: 100%; margin: 0 auto; }
+  .rsvp .guide::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; border-top: 1.5px solid var(--line); }
+  .rsvp .guide::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; border-left: 2px solid var(--line); }
+  .rsvp .guide.top::before { top: 0; } .rsvp .guide.bot::before { top: auto; bottom: 0; }
+  .rsvp .word {
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline; padding: 18px 0;
+    font: 500 var(--rsvp-size, 44px)/1.1 ui-serif, "New York", Georgia, serif; white-space: pre; overflow: hidden;
+  }
+  .rsvp .word .l { text-align: right; } .rsvp .word .r { text-align: left; }
+  .rsvp .word .p { color: var(--pivot); font-weight: 700; }
+  .rsvp .context { text-align: center; color: var(--muted); font-size: 14px; min-height: 2.6em; margin-top: 6px;
+                   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .rsvp .state { text-align: center; color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .rsvp .opts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+  .seg button { padding: 8px 12px; font-size: 13px; font-weight: 600; }
+  .seg button.on { background: var(--accent); color: var(--accent-ink); }
+  .seg span { padding: 8px 4px 8px 12px; font-size: 13px; color: var(--muted); }
+  .wpm { font-variant-numeric: tabular-nums; min-width: 72px; text-align: center; }
+
+  .tb.on { color: var(--accent); background: var(--now); }
+
+  /* ---------- chapter quiz ---------- */
+  .sheet h3 small { font-size: 13px; color: var(--muted); font-weight: 600; }
+  .quizq { font: 17px/1.55 ui-serif, Georgia, serif; margin: 4px 0 16px; }
+  .quizq .blank { display: inline-block; min-width: 3em; border-bottom: 2px solid var(--accent); color: var(--accent); }
+  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+  .choice { padding: 12px 10px; border-radius: 12px; border: 1px solid var(--line); font-weight: 600; font-size: 15px; }
+  .choice.right { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .choice.wrong { background: #b2463c; color: #fff; border-color: #b2463c; }
+  .choice.off { opacity: .5; }
+
+  /* ---------- ask AI ---------- */
+  .passage { font: 15px/1.5 ui-serif, Georgia, serif; border-left: 3px solid var(--accent); padding: 2px 0 2px 10px;
+             max-height: 9em; overflow: auto; margin-bottom: 12px; }
+  .askq { width: 100%; min-height: 64px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
+          background: var(--bg); color: var(--ink); font: 15px/1.4 -apple-system, sans-serif; resize: vertical; }
+  .askbtns { display: grid; gap: 10px; margin-top: 12px; }
+  .askbtns button { padding: 13px; border-radius: 12px; font-weight: 600; font-size: 15px; border: 1px solid var(--line); text-align: left; }
+  .askbtns button small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .askbtns .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .askbtns .primary small { color: inherit; opacity: .85; }
+
   /* ---------- selection toolbar + toast ---------- */
   .selbar {
     position: fixed; z-index: 35; display: flex; gap: 2px; padding: 4px;
@@ -188,6 +249,8 @@
   <symbol id="i-fwd15" viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-8-8h4M16 1l3 3-3 3"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
+  <symbol id="i-ask" viewBox="0 0 24 24"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4zM18 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
 </svg>
 
 <!-- Library -->
@@ -207,13 +270,28 @@
   <header>
     <button class="tb" id="backBtn" aria-label="Library"><svg class="icon"><use href="#i-back"/></svg></button>
     <div class="title"><b id="bookTitle"></b><small id="chapTitle"></small></div>
+    <button class="tb" id="rsvpBtn" aria-label="Speed reader"><svg class="icon"><use href="#i-bolt"/></svg></button>
+    <button class="tb" id="askBtn" aria-label="Ask AI"><svg class="icon"><use href="#i-ask"/></svg></button>
     <button class="tb" id="tocBtn" aria-label="Contents"><svg class="icon"><use href="#i-list"/></svg></button>
     <button class="tb" id="hlBtn" aria-label="Highlights"><svg class="icon"><use href="#i-mark"/></svg></button>
     <button class="tb" id="setBtn" aria-label="Text settings"><svg class="icon"><use href="#i-aa"/></svg></button>
   </header>
   <article id="text"></article>
+  <div class="wordbox hidden" id="wordbox"></div>
   <button class="follow hidden" id="followBtn">Back to where it's reading</button>
-  <div class="player">
+  <div class="rsvp hidden" id="rsvp">
+    <div class="chap" id="rsvpChap"></div>
+    <div class="stage" id="rsvpStage">
+      <div class="guide top"></div>
+      <div class="word" id="rsvpWord"><span class="l"></span><span class="p"></span><span class="r"></span></div>
+      <div class="guide bot"></div>
+      <div class="context" id="rsvpContext"></div>
+      <div class="state" id="rsvpState"></div>
+    </div>
+    <div class="opts" id="rsvpOpts"></div>
+  </div>
+  <div class="player" id="player">
+    <button class="chapbar" id="chapBar" aria-label="Chapters"><span class="num" id="chapNum"></span><span class="name" id="chapName"></span><span class="pct" id="bookPct"></span></button>
     <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Position in chapter">
     <div class="times"><span id="tNow">0:00</span><span id="tLeft"></span></div>
     <div class="row">
@@ -232,6 +310,7 @@
 <div class="selbar hidden" id="selbar">
   <button id="selHl">Highlight</button>
   <button id="selNote">Note</button>
+  <button id="selAsk">Ask</button>
 </div>
 <div class="toast hidden" id="toast"></div>
 <div class="busy hidden" id="busy"></div>

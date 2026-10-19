@@ -12,10 +12,9 @@ let paraEls = [];         // paragraph elements, same order as book.paras
 let cur = -1;             // paragraph being read
 let follow = true;        // keep the reading paragraph in view
 let sleep = { mode: 0, at: 0, chapterEnd: 0 };
-let pending = null;
-const wordHL = (window.CSS && CSS.highlights && window.Highlight) ? new Highlight() : null;
-if (wordHL) CSS.highlights.set('word', wordHL);
-let wordPara = -1, wordIdx = -1, wordRanges = [];       // position to jump to once the audio has loaded (iPhones load on first play)
+let pending = null;       // position to jump to once the audio has loaded (iPhones load on first play)
+const wordBox = $('#wordbox');
+let wordPara = -1, wordIdx = -1, wordRanges = [];
 
 /* ---------------------------------------------------------------- storage */
 
@@ -231,7 +230,7 @@ async function renderMarks() {
 
 function setCurrent(i, instant) {
   if (i === cur) return;
-  if (wordHL) { wordHL.clear(); wordIdx = -1; }
+  hideWord();
   if (paraEls[cur]) paraEls[cur].classList.remove('now');
   cur = i;
   const el = paraEls[i];
@@ -260,40 +259,86 @@ function textRange(el, a, b) {
   }
   return null;
 }
-function updateWord() {
-  if (!wordHL || !book || cur < 0) return;
+// Index of the word being spoken in paragraph i at time t. Books without word timings
+// spread the words evenly over the paragraph.
+function wordIndexAt(i, t) {
+  const p = book.paras[i];
+  if (p.w) {
+    const rel = (t - p.s) * 100;
+    let lo = 0, hi = p.w.length - 1, k = 0;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (p.w[mid] <= rel + 4) { k = mid; lo = mid + 1; } else hi = mid - 1; }
+    return k;
+  }
+  const n = p.t.split(/\s+/).length, end = paraEnd(i);
+  return Math.max(0, Math.min(n - 1, Math.floor(((t - p.s) / Math.max(0.1, end - p.s)) * n)));
+}
+// Time word k of paragraph i is spoken.
+function wordTime(i, k) {
+  const p = book.paras[i];
+  if (p.w && p.w[k] !== undefined) return p.s + p.w[k] / 100;
+  const n = p.t.split(/\s+/).length;
+  return p.s + (paraEnd(i) - p.s) * (k / n);
+}
+const paraEnd = (i) => (i + 1 < book.paras.length ? book.paras[i + 1].s : (audio.duration || book.duration || book.paras[i].s + 20));
+
+function hideWord() { wordIdx = -1; wordBox.classList.add('hidden'); }
+function updateWord(force) {
+  if (!book || cur < 0 || !paraEls[cur]) return;
   const p = book.paras[cur];
-  if (!p.w) return;
+  if (!p.w) return hideWord();
   if (wordPara !== cur) { wordPara = cur; wordRanges = wordSpans(p.t); wordIdx = -1; }
-  const rel = (pos() - p.s) * 100;
-  let lo = 0, hi = p.w.length - 1, k = 0;
-  while (lo <= hi) { const mid = (lo + hi) >> 1; if (p.w[mid] <= rel + 4) { k = mid; lo = mid + 1; } else hi = mid - 1; }
-  if (k === wordIdx || !wordRanges[k]) return;
+  const k = wordIndexAt(cur, pos());
+  if ((k === wordIdx && !force) || !wordRanges[k]) return;
   wordIdx = k;
   const r = textRange(paraEls[cur], wordRanges[k][0], wordRanges[k][1]);
-  wordHL.clear();
-  if (r) wordHL.add(r);
+  const box = r && r.getClientRects()[0];
+  if (!box) return hideWord();
+  const pad = 3;
+  Object.assign(wordBox.style, {
+    top: (box.top + scrollY - 1) + 'px', left: (box.left + scrollX - pad) + 'px',
+    width: (box.width + pad * 2) + 'px', height: (box.height + 2) + 'px',
+  });
+  wordBox.classList.remove('hidden');
+  // Long paragraphs: keep the spoken word on screen.
+  if (follow && !$('#reader').classList.contains('hidden') && $('#rsvp').classList.contains('hidden')) {
+    const playerTop = $('#player').getBoundingClientRect().top;
+    if (box.bottom > playerTop - 40 || box.top < 80) {
+      scrollBy({ top: box.top - (playerTop * 0.4), behavior: 'smooth' });
+    }
+  }
 }
 let ticking = false;
 function tick() {
   if (audio.paused || !book) { ticking = false; return; }
-  if (!document.hidden) updateWord();
+  if (!document.hidden) { updateWord(); if (rsvpOn) rsvpFollow(); }
   requestAnimationFrame(tick);
 }
 function startTick() { if (!ticking) { ticking = true; requestAnimationFrame(tick); } }
 
-let lastSave = 0, lastChapter = -1;
+let lastSave = 0, lastChapter = -1, lastT = 0;
 function onTime(force) {
   if (!book) return;
   const t = pos();
   setCurrent(findAt(book.paras, t, 's'));
+  updateWord(force);
+  if (rsvpOn && !rsvpRunning) rsvpFollow();
   const ci = chapterAt(t);
   const start = book.chapters[ci].start, end = chapterEnd(ci);
+  // Played (not jumped) into the next chapter: offer the quiz on the one just finished.
+  if (lastChapter >= 0 && ci === lastChapter + 1 && !audio.paused && lastT >= start - 3 && t - lastT < 3) {
+    quizAfterChapter(lastChapter);
+  }
+  lastT = t;
   if (ci !== lastChapter || force) {
     lastChapter = ci;
     $('#chapTitle').textContent = book.chapters[ci].title;
+    $('#chapNum').textContent = `${ci + 1} of ${book.chapters.length}`;
+    $('#chapName').textContent = book.chapters[ci].title;
+    $('#rsvpChap').textContent = `${ci + 1} of ${book.chapters.length} · ${book.chapters[ci].title}`;
     updateMediaMeta();
   }
+  const total = audio.duration || book.duration;
+  $('#bookPct').textContent = total ? `${Math.min(100, Math.floor((t / total) * 100))}% of book` : '';
   if (!seeking) $('#seek').value = Math.round(((t - start) / Math.max(1, end - start)) * 1000);
   $('#tNow').textContent = fmt(t - start);
   $('#tLeft').textContent = `-${fmt((end - t) / audio.playbackRate)} in chapter`;
@@ -314,7 +359,10 @@ function seekTo(t, play) {
 
 /* ---------------------------------------------------------------- player controls */
 
-function togglePlay() { audio.paused ? audio.play().catch(() => {}) : audio.pause(); }
+function togglePlay() {
+  if (rsvpOn && pref.get('rsvpMode', 'voice') === 'silent') return rsvpRunning ? rsvpPause() : rsvpPlay();
+  audio.paused ? audio.play().catch(() => {}) : audio.pause();
+}
 // The audio can't be read (saved by an older version of Read Along): ask for the book again.
 let warned = null;
 function needsReAdd() {
@@ -360,8 +408,11 @@ $('#speedBtn').onclick = function speedSheet() {
   });
 };
 audio.addEventListener('timeupdate', () => onTime(false));
-audio.addEventListener('play', () => { updatePlayIcon(); startTick(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
-audio.addEventListener('pause', () => { updatePlayIcon(); savePos(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
+audio.addEventListener('play', () => {
+  // Audio started (e.g. from AirPods) while silent speed reading: follow the voice instead.
+  if (rsvpRunning) { rsvpPause(); pref.set('rsvpMode', 'voice'); rsvpOptions(); }
+  updatePlayIcon(); startTick(); rsvpState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
+audio.addEventListener('pause', () => { updatePlayIcon(); savePos(); rsvpState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
 
 // Tap a paragraph to listen from there (but not while selecting text).
 $('#text').addEventListener('click', (e) => {
@@ -606,21 +657,26 @@ $('#scrim').onclick = closeSheet;
 
 $('#tocBtn').onclick = () => {
   const ci = chapterAt(pos());
-  openSheet(`<h3>Contents</h3>${book.chapters.map((c, i) =>
+  openSheet(`<h3>Contents</h3>
+    <div class="sendbar"><button id="quizNow">Quiz me on this chapter</button></div>${book.chapters.map((c, i) =>
     `<button class="item ${i === ci ? 'cur' : ''}" data-c="${i}">${esc(c.title)}<small>${fmt(c.start)}</small></button>`).join('')}`,
   (s) => {
     s.querySelectorAll('.item').forEach((b) => (b.onclick = () => { closeSheet(); seekTo(book.chapters[+b.dataset.c].start); }));
+    s.querySelector('#quizNow').onclick = () => { audio.pause(); rsvpPause(); showQuiz(ci, 0, 0); };
     const c = s.querySelector('.cur'); if (c) c.scrollIntoView({ block: 'center' });
   });
 };
 $('#hlBtn').onclick = () => showHighlights('');
+$('#chapBar').onclick = () => $('#tocBtn').onclick();
 
 function applyLook() {
   document.documentElement.style.setProperty('--text-size', pref.get('size', 19) + 'px');
   const th = pref.get('theme', 'auto');
   if (th === 'auto') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', th);
+  requestAnimationFrame(() => updateWord(true));
 }
+addEventListener('resize', () => { sizePanels(); updateWord(true); });
 $('#setBtn').onclick = function settings() {
   const th = pref.get('theme', 'auto');
   openSheet(`<h3>Text</h3>
@@ -628,14 +684,355 @@ $('#setBtn').onclick = function settings() {
     <div class="setrow"><span>Look</span></div>
     <div class="chips">${[['auto', 'Match phone'], ['light', 'Light'], ['sepia', 'Sepia'], ['dark', 'Dark']].map(([k, l]) =>
       `<button class="chip ${th === k ? 'on' : ''}" data-t="${k}">${l}</button>`).join('')}</div>
+    <div class="setrow"><span>Quiz after each chapter</span><div class="seg"><button data-q="1" class="${pref.get('quiz', true) ? 'on' : ''}">On</button><button data-q="0" class="${pref.get('quiz', true) ? '' : 'on'}">Off</button></div></div>
     <p class="tip"><b>AirPods:</b> press once to play or pause. <b>Double-press</b> to keep what you just heard as a highlight. <b>Triple-press</b> to go back 15 seconds.</p>`,
   (s) => {
     s.querySelectorAll('[data-s]').forEach((b) => (b.onclick = () => {
       pref.set('size', Math.max(14, Math.min(30, pref.get('size', 19) + +b.dataset.s))); applyLook();
     }));
     s.querySelectorAll('[data-t]').forEach((b) => (b.onclick = () => { pref.set('theme', b.dataset.t); applyLook(); settings(); }));
+    s.querySelectorAll('[data-q]').forEach((b) => (b.onclick = () => { pref.set('quiz', b.dataset.q === '1'); settings(); }));
   });
 };
+
+/* ---------------------------------------------------------------- speed reader */
+
+// Shows 1-3 words at a time with the focus letter in colour, centred so the eye stays still.
+// "With voice" follows the audio; "Silent" runs on its own at a words-per-minute speed.
+let rsvpOn = false, rsvpRunning = false, rsvpTimer = null, rsvpKey = '';
+let rsvpNext = { i: 0, k: 0 }, rsvpShownAt = { i: 0, k: 0 }, rsvpSteps = 0;
+let wordsI = -1, wordsW = [];
+function wordsOf(i) {
+  if (i !== wordsI) { wordsI = i; wordsW = book.paras[i].t.split(/\s+/).filter(Boolean); }
+  return wordsW;
+}
+// The letter the eye should rest on: a little left of the middle of the word.
+function focusLetter(w) {
+  const lead = (w.match(/^[^\p{L}\p{N}]*/u) || [''])[0].length;
+  const core = w.slice(lead).replace(/[^\p{L}\p{N}]+$/u, '').length;
+  return Math.min(w.length - 1, lead + (core <= 1 ? 0 : core <= 5 ? 1 : core <= 9 ? 2 : core <= 13 ? 3 : 4));
+}
+function showChunk(i, k) {
+  const n = pref.get('rsvpN', 1), ws = wordsOf(i), s = Math.floor(k / n) * n;
+  rsvpShownAt = { i, k: s };
+  const key = `${i}:${s}:${n}`;
+  if (key === rsvpKey) return;
+  rsvpKey = key;
+  const chunk = ws.slice(s, s + n);
+  if (!chunk.length) return;
+  const mid = Math.floor((chunk.length - 1) / 2), w = chunk[mid], at = focusLetter(w);
+  const [l, p, r] = $('#rsvpWord').children;
+  l.textContent = chunk.slice(0, mid).map((x) => x + ' ').join('') + w.slice(0, at);
+  p.textContent = w[at] || '';
+  r.textContent = w.slice(at + 1) + chunk.slice(mid + 1).map((x) => ' ' + x).join('');
+  // Shrink long words so both halves fit either side of the centre.
+  const longest = Math.max(3, l.textContent.length, r.textContent.length);
+  const half = Math.min(innerWidth - 32, 600) / 2;
+  $('#rsvpWord').style.setProperty('--rsvp-size', Math.max(20, Math.min(48, half / (longest * 0.56))) + 'px');
+}
+function rsvpFollow() {
+  if (!rsvpOn || rsvpRunning || !book) return;
+  const t = pos(), i = findAt(book.paras, t, 's');
+  showChunk(i, wordIndexAt(i, t));
+  rsvpState();
+}
+function rsvpState() {
+  if (!rsvpOn) return;
+  const silent = pref.get('rsvpMode', 'voice') === 'silent';
+  const playing = silent ? rsvpRunning : !audio.paused;
+  $('#rsvpState').textContent = playing
+    ? (silent ? `${pref.get('rsvpWpm', 350)} words a minute · tap to pause` : `With the voice at ${audio.playbackRate}× · tap to pause`)
+    : (silent ? 'Tap the word to start reading' : 'Tap the word to play');
+  // While paused, show the paragraph so you can get your bearings.
+  $('#rsvpContext').textContent = playing ? '' : book.paras[rsvpShownAt.i].t;
+}
+function rsvpStep() {
+  const n = pref.get('rsvpN', 1), wpm = pref.get('rsvpWpm', 350);
+  const { i, k } = rsvpNext;
+  showChunk(i, k);
+  const ws = wordsOf(i), s = Math.floor(k / n) * n, chunk = ws.slice(s, s + n), last = chunk[chunk.length - 1] || '';
+  let delay = (60000 / wpm) * Math.max(1, chunk.length);
+  if (/[.!?]["'”’)]*$/.test(last)) delay *= 1.8;
+  else if (/[,;:—–]["'”’)]*$/.test(last)) delay *= 1.3;
+  if (chunk.some((w) => w.length > 9)) delay *= 1.2;
+  let ni = i, nk = s + n;
+  if (nk >= ws.length) { ni = i + 1; nk = 0; delay *= 1.6; }
+  // Keep the listening position in step (now and then; seeking audio is slow on phones).
+  if (ni !== i || ++rsvpSteps % 12 === 0) { setPos(wordTime(i, s)); onTime(false); }
+  if (ni >= book.paras.length) { rsvpTimer = setTimeout(rsvpPause, delay); return; }
+  const ci = chapterAt(book.paras[i].s);
+  if (ni !== i && chapterAt(book.paras[ni].s) !== ci && pref.get('quiz', true) && buildQuiz(ci).length) {
+    rsvpNext = { i: ni, k: 0 };
+    rsvpTimer = setTimeout(() => { rsvpPause(); setPos(book.paras[ni].s); onTime(true); quizAfterChapter(ci); }, delay);
+    return;
+  }
+  rsvpNext = { i: ni, k: nk };
+  rsvpTimer = setTimeout(rsvpStep, delay);
+}
+function rsvpPlay() {
+  if (rsvpRunning) return;
+  audio.pause();
+  const t = pos(), i = findAt(book.paras, t, 's');
+  rsvpNext = { i, k: wordIndexAt(i, t) };
+  rsvpRunning = true; rsvpKey = '';
+  rsvpStep(); rsvpState();
+}
+function rsvpPause() {
+  if (!rsvpRunning) return;
+  rsvpRunning = false; clearTimeout(rsvpTimer);
+  setPos(wordTime(rsvpShownAt.i, rsvpShownAt.k)); onTime(true); savePos();
+  rsvpState();
+}
+function rsvpOptions() {
+  const mode = pref.get('rsvpMode', 'voice'), n = pref.get('rsvpN', 1), wpm = pref.get('rsvpWpm', 350);
+  $('#rsvpOpts').innerHTML = `
+    <div class="seg"><button data-mode="voice" class="${mode === 'voice' ? 'on' : ''}">With voice</button><button data-mode="silent" class="${mode === 'silent' ? 'on' : ''}">Silent</button></div>
+    <div class="seg"><span>Words</span>${[1, 2, 3].map((v) => `<button data-n="${v}" class="${n === v ? 'on' : ''}">${v}</button>`).join('')}</div>
+    ${mode === 'silent' ? `<div class="seg"><button data-w="-25" aria-label="Slower">−</button><span class="wpm">${wpm} wpm</span><button data-w="25" aria-label="Faster">+</button></div>` : ''}
+    <div class="seg"><button id="rsvpDone">Done</button></div>`;
+  const o = $('#rsvpOpts');
+  o.querySelectorAll('[data-mode]').forEach((b) => (b.onclick = () => {
+    pref.set('rsvpMode', b.dataset.mode);
+    if (b.dataset.mode === 'silent') audio.pause(); else rsvpPause();
+    rsvpOptions(); rsvpFollow(); rsvpState();
+  }));
+  o.querySelectorAll('[data-n]').forEach((b) => (b.onclick = () => { pref.set('rsvpN', +b.dataset.n); rsvpKey = ''; rsvpOptions(); rsvpRunning ? showChunk(rsvpShownAt.i, rsvpShownAt.k) : rsvpFollow(); }));
+  o.querySelectorAll('[data-w]').forEach((b) => (b.onclick = () => {
+    pref.set('rsvpWpm', Math.max(100, Math.min(1000, wpm + +b.dataset.w))); rsvpOptions(); rsvpState();
+  }));
+  $('#rsvpDone').onclick = closeRsvp;
+}
+function sizePanels() { document.documentElement.style.setProperty('--player-h', $('#player').offsetHeight + 'px'); }
+function openRsvp() {
+  rsvpOn = true; rsvpKey = '';
+  sizePanels();
+  $('#rsvp').classList.remove('hidden'); $('#rsvpBtn').classList.add('on');
+  hideWord(); rsvpOptions(); rsvpFollow(); onTime(true);
+}
+function closeRsvp() {
+  rsvpPause(); rsvpOn = false;
+  $('#rsvp').classList.add('hidden'); $('#rsvpBtn').classList.remove('on');
+  follow = true; $('#followBtn').classList.add('hidden');
+  const el = paraEls[cur]; if (el) el.scrollIntoView({ block: 'center' });
+  updateWord(true);
+}
+$('#rsvpBtn').onclick = () => (rsvpOn ? closeRsvp() : openRsvp());
+$('#rsvpStage').onclick = () => { unlockChime(); togglePlay(); };
+
+/* ---------------------------------------------------------------- ask AI */
+
+const ASK_IDEAS = ['Explain this simply', 'How could I apply this?', 'How does this fit the whole book?', 'Give me 3 discussion questions'];
+function currentPassage() {
+  let i = Math.max(0, cur);
+  if (book.paras[i].h && book.paras[i + 1]) i += 1;
+  return book.paras[i].t;
+}
+function askText(passage, q) {
+  const chap = book.chapters[chapterAt(pos())].title;
+  return `I'm reading "${book.title}"${book.author ? ` by ${book.author}` : ''}, chapter "${chap}".\n\n` +
+    `Passage:\n"${passage.slice(0, 2500)}"\n\n${q || 'Explain this passage and how it fits the main ideas of the book.'}`;
+}
+function askSheet(passage) {
+  passage = (passage || currentPassage()).trim();
+  const nb = book.notebook;
+  openSheet(`<h3>Ask about this</h3>
+    <div class="passage">${esc(passage)}</div>
+    <div class="chips">${ASK_IDEAS.map((s) => `<button class="chip" data-q="${esc(s)}">${esc(s)}</button>`).join('')}</div>
+    <textarea class="askq" id="askQ" placeholder="Your question (optional)"></textarea>
+    <div class="askbtns">
+      <button class="primary" id="askNlm">Ask NotebookLM<small>Knows the whole book${nb ? ` (${esc(nb.title)} notebook)` : ''}. Your question is copied: paste it into the chat.</small></button>
+      <button id="askClaude">Ask Claude<small>Opens Claude with this passage and your question filled in.</small></button>
+    </div>
+    <p class="tip">Needs internet. Nothing is sent until you tap one of these.</p>`,
+  (s) => {
+    const q = s.querySelector('#askQ');
+    s.querySelectorAll('[data-q]').forEach((c) => (c.onclick = () => { q.value = c.dataset.q; }));
+    s.querySelector('#askNlm').onclick = () => {
+      const text = askText(passage, q.value.trim());
+      if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+      window.open(nb && nb.id ? `https://notebooklm.google.com/notebook/${nb.id}` : 'https://notebooklm.google.com/', '_blank');
+      toast('Question copied. Paste it into NotebookLM.');
+    };
+    s.querySelector('#askClaude').onclick = () => {
+      window.open('https://claude.ai/new?q=' + encodeURIComponent(askText(passage, q.value.trim())), '_blank');
+    };
+  });
+}
+$('#askBtn').onclick = () => { audio.pause(); rsvpPause(); askSheet(); };
+$('#selAsk').addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  const quote = selInfo ? selInfo.quote : '';
+  getSelection().removeAllRanges(); $('#selbar').classList.add('hidden');
+  audio.pause(); askSheet(quote);
+});
+
+/* ---------------------------------------------------------------- chapter quiz */
+
+// Made on the phone from the book's own text: the chapter's key words are the ones it
+// uses often but the rest of the book rarely does. Each becomes a fill-in-the-blank question.
+const STOP = new Set(('a about above after again against all almost also although always am among an and another any anyone ' +
+  'anything are around as at away back be became because become been before being below between both but by came can ' +
+  'cannot come could did do does doing done down during each either else even ever every everyone everything few find ' +
+  'first for found from further get gets getting give given go goes going gone good got great had has have having he her ' +
+  'here hers herself him himself his how however i if in into is it its itself just keep know known last least less let ' +
+  'like little long look made make makes making many may me might more most much must my myself need never new next no ' +
+  'none nor not nothing now of off often old on once one only or other others our ours ourselves out over own part people ' +
+  'perhaps place put quite rather really right said same saw say says see seem seemed seems seen several shall she should ' +
+  'show since so some someone something sometimes still such take taken than that the their theirs them themselves then ' +
+  'there therefore these they thing things think this those though thought three through thus time times to today together ' +
+  'too took toward towards two under until up upon us use used using very want wanted was way ways we well went were what ' +
+  'whatever when where whether which while who whole whom whose why will with within without would year years yet you your ' +
+  'yours yourself yourselves chapter book chapters page pages copyright rights reserved permission publication isbn ' +
+  'press edition printed thou thee thy thine wilt hath doth unto ' +
+  'zero four five six seven eight nine ten eleven twelve twenty thirty forty fifty sixty seventy eighty ninety hundred ' +
+  'hundreds thousand thousands million millions billion').split(' '));
+let quizIndex = null, quizBook = null;
+function termsOf(text) {
+  const out = [];
+  // Two-word terms only within a phrase, never across punctuation.
+  for (const phrase of text.toLowerCase().split(/[.,;:!?()\[\]"“”—–]+/)) {
+    const toks = (phrase.match(/\p{L}[\p{L}'’-]*\p{L}/gu) || []).map((t) => t.replace(/['’]s$/, ''));
+    for (let j = 0; j < toks.length; j++) {
+      const a = toks[j], b = toks[j + 1];
+      if (STOP.has(a)) continue;
+      if (a.length >= 4) out.push(a);
+      if (b && !STOP.has(b) && a.length >= 3 && b.length >= 3) out.push(a + ' ' + b);
+    }
+  }
+  return out;
+}
+// How a term is written in the chapter ("Wesley", "class meeting"), and whether it's a name.
+function surfaceOf(term, ci) {
+  const [a, b] = chapterParas(ci), re = new RegExp(`\\b${reEsc(term).replace(/ /g, '\\s+')}\\b`, 'gi');
+  let caps = 0, low = 0, form = term;
+  for (let i = a; i < b; i++) {
+    for (const m of book.paras[i].t.matchAll(re)) {
+      const before = book.paras[i].t.slice(0, m.index).trimEnd();
+      if (!before || /[.!?:"“]$/.test(before)) continue;          // sentence starts don't tell us
+      if (/^\p{Lu}/u.test(m[0])) { caps++; form = m[0].replace(/\s+/g, ' '); } else low++;
+    }
+  }
+  return caps > low ? { form, name: true } : { form: term, name: false };
+}
+function chapterParas(ci) {
+  const at = (c) => (c.para !== undefined ? c.para : findAt(book.paras, c.start, 's'));
+  return [at(book.chapters[ci]), ci + 1 < book.chapters.length ? at(book.chapters[ci + 1]) : book.paras.length];
+}
+function buildQuizIndex() {
+  const ch = book.chapters.map((c, ci) => {
+    const [a, b] = chapterParas(ci), tf = new Map();
+    let words = 0;
+    for (let i = a; i < b; i++) {
+      if (book.paras[i].h) continue;
+      words += book.paras[i].t.split(/\s+/).length;
+      for (const t of termsOf(book.paras[i].t)) tf.set(t, (tf.get(t) || 0) + 1);
+    }
+    return { a, b, tf, words };
+  });
+  const df = new Map();
+  ch.forEach((c) => c.tf.forEach((_, t) => df.set(t, (df.get(t) || 0) + 1)));
+  quizIndex = { ch, df, cache: {} }; quizBook = book.id;
+}
+function keyTerms(ci, max) {
+  const { ch, df } = quizIndex, N = ch.length, scored = [];
+  ch[ci].tf.forEach((n, t) => {
+    if (n < 2) return;
+    scored.push([t, n * Math.log(1 + N / df.get(t)) * (t.includes(' ') ? 1.6 : 1)]);
+  });
+  scored.sort((x, y) => y[1] - x[1]);
+  const picked = [];
+  for (const [t] of scored) {
+    if (picked.some((p) => p.includes(t) || t.includes(p))) continue;   // "church" vs "churches", "class" vs "class meeting"
+    picked.push(t);
+    if (picked.length >= max) break;
+  }
+  return picked;
+}
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+function buildQuiz(ci) {
+  if (!quizIndex || quizBook !== book.id) buildQuizIndex();
+  if (quizIndex.cache[ci]) return quizIndex.cache[ci];
+  const c = quizIndex.ch[ci];
+  if (!c || c.words < 250) return (quizIndex.cache[ci] = []);
+  const terms = keyTerms(ci, 12), qs = [], used = new Set();
+  for (const term of terms) {
+    const re = new RegExp(`\\b(${reEsc(term).replace(/ /g, '\\s+')})(?:['’]s)?\\b`, 'i');
+    let best = null;
+    for (let i = c.a; i < c.b; i++) {
+      if (book.paras[i].h) continue;
+      for (const raw of book.paras[i].t.match(/[^.!?]+[.!?]+["'”’)]*|[^.!?]+$/g) || []) {
+        const s = raw.trim().replace(/^\d+\s+/, ''), m = s.match(re);   // drop a footnote number at the start
+        if (!m || s.length < 50 || s.length > 260 || used.has(s)) continue;
+        let score = -Math.abs(s.length - 140) / 60;
+        if (/\b(is|are|was|were|means|meant|called|refers)\b/i.test(s)) score += 1;
+        if (!best || score > best.score) best = { s, m, i, score };
+      }
+    }
+    if (!best) continue;
+    used.add(best.s);
+    const at = best.m.index, word = best.m[1];
+    qs.push({ term: word, para: best.i, before: best.s.slice(0, at), after: best.s.slice(at + word.length) });
+    if (qs.length >= 5) break;
+  }
+  // Wrong answers: other key words from this chapter, then from the full chapters either side,
+  // of the same kind as the right answer (a name for a name, one word for one word).
+  const pool = terms.map((t) => [t, ci]);
+  for (const d of [1, -1, 2, -2, 3, -3]) {
+    const o = quizIndex.ch[ci + d];
+    if (o && o.words >= 250) pool.push(...keyTerms(ci + d, 6).map((t) => [t, ci + d]));
+  }
+  const kinds = pool.map(([t, c]) => ({ t, ...surfaceOf(t, c) }));
+  for (const q of qs) {
+    const t = q.term.toLowerCase().replace(/\s+/g, ' '), me = surfaceOf(t, ci);
+    const ok = kinds.filter((k) => !k.t.includes(t) && !t.includes(k.t));
+    const alike = ok.filter((k) => k.name === me.name && k.t.includes(' ') === t.includes(' '));
+    const wrong = [];
+    for (const k of [...shuffle(alike), ...shuffle(ok)]) if (!wrong.includes(k.form) && wrong.length < 3) wrong.push(k.form);
+    q.answer = me.form;
+    q.choices = shuffle([me.form, ...wrong]);
+  }
+  return (quizIndex.cache[ci] = qs.filter((q) => q.choices.length >= 3));
+}
+function quizAfterChapter(ci) {
+  if (!pref.get('quiz', true) || !buildQuiz(ci).length) return;
+  audio.pause();
+  showQuiz(ci, 0, 0);
+}
+function showQuiz(ci, n, score) {
+  const qs = buildQuiz(ci), title = esc(book.chapters[ci].title);
+  if (!qs.length) return toast('This chapter is too short for a quiz');
+  if (n >= qs.length) {
+    return openSheet(`<h3>Chapter check <small>${score} of ${qs.length}</small></h3>
+      <p class="tip" style="margin-top:0">${title}</p>
+      <p>Key words in this chapter:</p>
+      <div class="chips">${qs.map((q) => `<span class="chip">${esc(q.answer)}</span>`).join('')}</div>
+      <div class="sendbar"><button id="qAgain">Try again</button><button class="primary" id="qGo">Keep listening</button></div>`,
+    (s) => {
+      s.querySelector('#qAgain').onclick = () => { quizIndex.cache[ci] = null; showQuiz(ci, 0, 0); };
+      s.querySelector('#qGo').onclick = () => { closeSheet(); if (!rsvpOn || pref.get('rsvpMode', 'voice') === 'voice') audio.play().catch(() => {}); else rsvpPlay(); };
+    });
+  }
+  const q = qs[n];
+  openSheet(`<h3>Chapter check <small>${n + 1} of ${qs.length}</small></h3>
+    <p class="tip" style="margin-top:0">${title}</p>
+    <p class="quizq">${esc(q.before)}<b class="blank">${' '.repeat(3)}</b>${esc(q.after)}</p>
+    <div class="choices">${q.choices.map((c) => `<button class="choice" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+    <div class="sendbar hidden" id="qFoot"><button id="qListen">Listen to this part</button><button class="primary" id="qNext">${n + 1 < qs.length ? 'Next' : 'See score'}</button></div>`,
+  (s) => {
+    let right = false;
+    s.querySelectorAll('.choice').forEach((b) => (b.onclick = () => {
+      if (!s.querySelector('#qFoot').classList.contains('hidden')) return;
+      right = b.dataset.c === q.answer;
+      s.querySelectorAll('.choice').forEach((x) => x.classList.add(x.dataset.c === q.answer ? 'right' : x === b ? 'wrong' : 'off'));
+      s.querySelector('.blank').textContent = q.term;
+      s.querySelector('#qFoot').classList.remove('hidden');
+    }));
+    s.querySelector('#qListen').onclick = () => { closeSheet(); seekTo(book.paras[q.para].s, true); };
+    s.querySelector('#qNext').onclick = () => showQuiz(ci, n + 1, score + (right ? 1 : 0));
+  });
+}
+audio.addEventListener('ended', () => quizAfterChapter(book.chapters.length - 1));
 
 /* ---------------------------------------------------------------- start */
 
