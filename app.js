@@ -2,7 +2,7 @@
    Books, audio, highlights and reading positions are stored on the device only. */
 'use strict';
 
-const VERSION = '6 (20 Oct)';
+const VERSION = '7 (20 Oct)';
 const $ = (s) => document.querySelector(s);
 const audio = $('#audio');
 const SPEEDS = [0.8, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.5, 4];
@@ -200,6 +200,11 @@ async function openBook(id) {
   onTime(true);
   busy();
   setupMediaSession();
+  estCache.clear();
+  if (!hasExactWords() && !pref.get('wordsWarned:' + id, false)) {
+    pref.set('wordsWarned:' + id, true);
+    setTimeout(() => alert(`This copy of "${book.title}" was added before word-by-word timings existed, so the word highlight and speed reader are only estimates.\n\nFor exact timing: AirDrop the book's .kbook file to this phone again, then tap Add a book and choose it. Your highlights and place are kept.`), 400);
+  }
 }
 
 function renderText() {
@@ -260,25 +265,36 @@ function textRange(el, a, b) {
   }
   return null;
 }
-// Index of the word being spoken in paragraph i at time t. Books without word timings
-// spread the words evenly over the paragraph.
-function wordIndexAt(i, t) {
+// Start of each word in paragraph i, in hundredths of a second from the paragraph start.
+// Exact when the book file has word timings; otherwise estimated from word length and
+// punctuation pauses (book files made before word timings existed).
+const estCache = new Map();
+function wordStarts(i) {
   const p = book.paras[i];
-  if (p.w) {
-    const rel = (t - p.s) * 100;
-    let lo = 0, hi = p.w.length - 1, k = 0;
-    while (lo <= hi) { const mid = (lo + hi) >> 1; if (p.w[mid] <= rel + 4) { k = mid; lo = mid + 1; } else hi = mid - 1; }
-    return k;
-  }
-  const n = p.t.split(/\s+/).length, end = paraEnd(i);
-  return Math.max(0, Math.min(n - 1, Math.floor(((t - p.s) / Math.max(0.1, end - p.s)) * n)));
+  const n = p.t.split(/\s+/).filter(Boolean).length;
+  if (p.w && p.w.length === n) return p.w;
+  if (estCache.has(i)) return estCache.get(i);
+  const words = p.t.split(/\s+/).filter(Boolean);
+  const weight = words.map((w) => w.length + 1 + (/[.!?]["'”’)]*$/.test(w) ? 3 : /[,;:—–]["'”’)]*$/.test(w) ? 3 : 0));
+  const total = weight.reduce((a, b) => a + b, 0) || 1;
+  const span = Math.max(0.1, paraEnd(i) - p.s - 0.9) * 100;   // the voice pauses ~0.9 s before the next paragraph
+  const out = []; let acc = 0;
+  for (const w of weight) { out.push(Math.round((acc / total) * span)); acc += w; }
+  estCache.set(i, out);
+  return out;
+}
+const hasExactWords = () => { const body = book.paras.filter((p) => !p.h); return body.filter((p) => p.w).length > body.length / 2; };
+// Index of the word being spoken in paragraph i at time t.
+function wordIndexAt(i, t) {
+  const w = wordStarts(i), rel = (t - book.paras[i].s) * 100;
+  let lo = 0, hi = w.length - 1, k = 0;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (w[mid] <= rel + 4) { k = mid; lo = mid + 1; } else hi = mid - 1; }
+  return k;
 }
 // Time word k of paragraph i is spoken.
 function wordTime(i, k) {
-  const p = book.paras[i];
-  if (p.w && p.w[k] !== undefined) return p.s + p.w[k] / 100;
-  const n = p.t.split(/\s+/).length;
-  return p.s + (paraEnd(i) - p.s) * (k / n);
+  const w = wordStarts(i);
+  return book.paras[i].s + (w[Math.min(k, w.length - 1)] || 0) / 100;
 }
 const paraEnd = (i) => (i + 1 < book.paras.length ? book.paras[i + 1].s : (audio.duration || book.duration || book.paras[i].s + 20));
 
@@ -286,7 +302,6 @@ function hideWord() { wordIdx = -1; wordBox.classList.add('hidden'); }
 function updateWord(force) {
   if (!book || cur < 0 || !paraEls[cur]) return;
   const p = book.paras[cur];
-  if (!p.w) return hideWord();
   if (wordPara !== cur) { wordPara = cur; wordRanges = wordSpans(p.t); wordIdx = -1; }
   const k = wordIndexAt(cur, pos());
   if ((k === wordIdx && !force) || !wordRanges[k]) return;
@@ -686,7 +701,7 @@ $('#setBtn').onclick = function settings() {
     <div class="chips">${[['auto', 'Match phone'], ['light', 'Light'], ['sepia', 'Sepia'], ['dark', 'Dark']].map(([k, l]) =>
       `<button class="chip ${th === k ? 'on' : ''}" data-t="${k}">${l}</button>`).join('')}</div>
     <div class="setrow"><span>Quiz after each chapter</span><div class="seg"><button data-q="1" class="${pref.get('quiz', true) ? 'on' : ''}">On</button><button data-q="0" class="${pref.get('quiz', true) ? '' : 'on'}">Off</button></div></div>
-    <p class="tip">Read Along version ${VERSION}</p>
+    <p class="tip">Read Along version ${VERSION}${book ? ` · Word timing for this book: ${hasExactWords() ? '<b>exact</b>' : '<b>estimated</b> (add the book again for exact timing)'}` : ''}</p>
     <p class="tip"><b>AirPods:</b> press once to play or pause. <b>Double-press</b> to keep what you just heard as a highlight. <b>Triple-press</b> to go back 15 seconds.</p>`,
   (s) => {
     s.querySelectorAll('[data-s]').forEach((b) => (b.onclick = () => {
