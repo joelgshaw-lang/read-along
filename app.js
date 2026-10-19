@@ -2,6 +2,7 @@
    Books, audio, highlights and reading positions are stored on the device only. */
 'use strict';
 
+const VERSION = '6 (20 Oct)';
 const $ = (s) => document.querySelector(s);
 const audio = $('#audio');
 const SPEEDS = [0.8, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.5, 4];
@@ -685,6 +686,7 @@ $('#setBtn').onclick = function settings() {
     <div class="chips">${[['auto', 'Match phone'], ['light', 'Light'], ['sepia', 'Sepia'], ['dark', 'Dark']].map(([k, l]) =>
       `<button class="chip ${th === k ? 'on' : ''}" data-t="${k}">${l}</button>`).join('')}</div>
     <div class="setrow"><span>Quiz after each chapter</span><div class="seg"><button data-q="1" class="${pref.get('quiz', true) ? 'on' : ''}">On</button><button data-q="0" class="${pref.get('quiz', true) ? '' : 'on'}">Off</button></div></div>
+    <p class="tip">Read Along version ${VERSION}</p>
     <p class="tip"><b>AirPods:</b> press once to play or pause. <b>Double-press</b> to keep what you just heard as a highlight. <b>Triple-press</b> to go back 15 seconds.</p>`,
   (s) => {
     s.querySelectorAll('[data-s]').forEach((b) => (b.onclick = () => {
@@ -1047,4 +1049,12 @@ applyLook();
   if (last && await get('books', last).catch(() => null)) openBook(last); else showLibrary();
 })();
 window.addEventListener('pagehide', savePos);
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => {});
+  // A new version has taken over: reload once to use it (not while listening).
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloaded || !audio.paused) return;
+    reloaded = true; savePos(); location.reload();
+  });
+}
