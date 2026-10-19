@@ -120,6 +120,7 @@ async function removeBook(id) {
   const b = await get('books', id);
   if (!b || !confirm(`Remove "${b.title}" from this phone? Your highlights for it will be removed too.`)) return;
   await del('books', id); await del('audio', id);
+  for (let k = 0; k < (b.chunks || 0); k++) await del('audio', id + ':' + k);
   for (const h of await byBook(id)) await del('highlights', h.id);
   showLibrary();
 }
@@ -132,10 +133,19 @@ async function importFile(file) {
     if (magic !== 'KBOOK1\n') throw new Error('That isn\'t a .kbook file.');
     const len = Number(head.getBigUint64(7));
     const meta = JSON.parse(await file.slice(15, 15 + len).text());
-    const blob = file.slice(15 + len, file.size, 'audio/mp4');
+    // Copy the audio into the phone's storage in pieces. Saving the picked file directly
+    // only keeps a link to a temporary copy that iOS deletes once the app closes.
+    const start = 15 + len, CHUNK = 8 * 1024 * 1024;
+    meta.chunks = Math.ceil((file.size - start) / CHUNK);
+    for (let k = 0; k < meta.chunks; k++) {
+      busy(`Adding book… ${Math.round(k / meta.chunks * 100)}%`);
+      const bytes = await file.slice(start + k * CHUNK, Math.min(file.size, start + (k + 1) * CHUNK)).arrayBuffer();
+      await put('audio', new Blob([bytes]), meta.id + ':' + k);
+    }
+    const blob = await loadAudio(meta);
     meta.duration = (await audioDuration(blob)) || (meta.paras.length ? meta.paras[meta.paras.length - 1].s + 30 : 0);
     meta.added = Date.now();
-    await put('audio', blob, meta.id);
+    await del('audio', meta.id);   // an older copy saved the broken way
     await put('books', meta);
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
     busy();
@@ -143,8 +153,15 @@ async function importFile(file) {
     showLibrary();
   } catch (e) {
     busy();
-    alert('Couldn\'t add that book: ' + e.message);
+    alert('Couldn\'t add that book: ' + ((e && e.message) || 'the phone may be out of space.'));
   }
+}
+
+async function loadAudio(b) {
+  if (!b.chunks) return get('audio', b.id);   // added before the fix: may no longer play
+  const parts = [];
+  for (let k = 0; k < b.chunks; k++) parts.push(await get('audio', b.id + ':' + k));
+  return parts.includes(undefined) ? null : new Blob(parts, { type: 'audio/mp4' });
 }
 
 function audioDuration(blob) {
@@ -162,9 +179,10 @@ function audioDuration(blob) {
 async function openBook(id) {
   busy('Opening…');
   book = await get('books', id);
-  const blob = await get('audio', id);
+  const blob = await loadAudio(book);
   if (audio.src) URL.revokeObjectURL(audio.src);
-  audio.src = URL.createObjectURL(blob);
+  if (blob) audio.src = URL.createObjectURL(blob); else audio.removeAttribute('src');
+  if (!book.chunks) needsReAdd();
   audio.playbackRate = pref.get('speed', 1); audio.preservesPitch = true;
   pref.set('opened:' + id, Date.now());
   pref.set('last', id);
@@ -296,7 +314,15 @@ function seekTo(t, play) {
 
 /* ---------------------------------------------------------------- player controls */
 
-function togglePlay() { audio.paused ? audio.play() : audio.pause(); }
+function togglePlay() { audio.paused ? audio.play().catch(() => {}) : audio.pause(); }
+// The audio can't be read (saved by an older version of Read Along): ask for the book again.
+let warned = null;
+function needsReAdd() {
+  if (!book || warned === book.id) return;
+  warned = book.id;
+  setTimeout(() => alert(`The audio for "${book.title}" needs adding again.\n\nGo back to your books, tap Add a book and choose the same .kbook file. Your highlights and place are kept.`), 300);
+}
+audio.addEventListener('error', () => { if (audio.getAttribute('src')) needsReAdd(); });
 function updatePlayIcon() {
   $('#playIcon').setAttribute('href', audio.paused ? '#i-play' : '#i-pause');
   $('#playBtn').setAttribute('aria-label', audio.paused ? 'Play' : 'Pause');
