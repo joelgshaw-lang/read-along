@@ -53,6 +53,7 @@
     position: sticky; top: 0; z-index: 20;
     display: flex; align-items: center; gap: 4px;
     padding: calc(env(safe-area-inset-top) + 6px) 8px 6px;
+    background: var(--bg);
     background: color-mix(in srgb, var(--bg) 92%, transparent);
     backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--line);
@@ -103,17 +104,33 @@
   #text .now { background: var(--now); }
   /* The spoken word: a box laid over the text. Blending keeps the letters crisp in every theme. */
   .wordbox { position: absolute; z-index: 5; pointer-events: none; border-radius: 5px;
-             background: var(--word); mix-blend-mode: var(--word-blend); transition: top .08s, left .08s, width .08s; }
+             background: var(--word); mix-blend-mode: var(--word-blend); }
   .wordbox.hidden { display: block !important; opacity: 0; }
   #text mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padding: 0 1px; }
   #text mark.note::after { content: "✎"; font-size: .7em; vertical-align: super; margin-left: 2px; }
 
   .follow {
     position: fixed; left: 50%; transform: translateX(-50%);
-    bottom: calc(env(safe-area-inset-bottom) + 150px); z-index: 25;
-    background: var(--accent); color: var(--accent-ink); border-radius: 999px;
-    padding: 9px 16px; font-weight: 600; font-size: 14px; box-shadow: var(--shadow);
+    bottom: calc(var(--player-h, 170px) + 14px); z-index: 25;
+    display: flex; gap: 0; border-radius: 999px; overflow: hidden; box-shadow: var(--shadow);
+    font-weight: 600; font-size: 14px; white-space: nowrap;
   }
+  .follow button { padding: 10px 16px; background: var(--surface); color: var(--accent); }
+  .follow button.main { background: var(--accent); color: var(--accent-ink); }
+  .speedbubble { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--player-h, 170px) + 20px);
+    z-index: 45; background: var(--ink); color: var(--bg); border-radius: 18px; padding: 12px 22px; text-align: center;
+    box-shadow: var(--shadow); pointer-events: none; }
+  .speedbubble b { display: block; font-size: 34px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .speedbubble small { font-size: 12px; opacity: .8; }
+  #speedBtn { touch-action: none; -webkit-user-select: none; user-select: none; }
+  .bigspeed { font-size: 26px; font-variant-numeric: tabular-nums; color: var(--accent); }
+  .speedslider { width: 100%; height: 44px; accent-color: var(--accent); margin: 4px 0 0; }
+  .spscale { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .sublabel { display: block; color: var(--muted); font-size: 12px; }
+  .tb.badge { position: relative; }
+  .tb.badge::after { content: attr(data-n); position: absolute; top: 4px; right: 2px; min-width: 17px; height: 17px;
+    border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700;
+    display: grid; place-items: center; padding: 0 4px; }
 
   /* ---------- player ---------- */
   .player {
@@ -249,6 +266,7 @@
   <symbol id="i-fwd15" viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-8-8h4M16 1l3 3-3 3"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-keep" viewBox="0 0 24 24"><path d="M15 4l5 5-9 9H6v-5zM13 6l5 5M4 21h16"/></symbol>
   <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
   <symbol id="i-ask" viewBox="0 0 24 24"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4zM18 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
 </svg>
@@ -278,7 +296,8 @@
   </header>
   <article id="text"></article>
   <div class="wordbox hidden" id="wordbox"></div>
-  <button class="follow hidden" id="followBtn">Back to where it's reading</button>
+  <div class="follow hidden" id="followBar"><button class="main" id="playHere">▶ Play from here</button><button id="followBtn">Back to the voice</button></div>
+  <div class="speedbubble hidden" id="speedBubble"></div>
   <div class="rsvp hidden" id="rsvp">
     <div class="chap" id="rsvpChap"></div>
     <div class="stage" id="rsvpStage">
@@ -299,6 +318,7 @@
       <button class="pbtn" id="b15" aria-label="Back 15 seconds"><svg class="icon"><use href="#i-back15"/></svg></button>
       <button class="play" id="playBtn" aria-label="Play"><svg class="icon"><use href="#i-play" id="playIcon"/></svg></button>
       <button class="pbtn" id="f15" aria-label="Forward 15 seconds"><svg class="icon"><use href="#i-fwd15"/></svg></button>
+      <button class="pbtn" id="keepBtn" aria-label="Highlight what I just heard"><svg class="icon"><use href="#i-keep"/></svg></button>
       <button class="pbtn" id="sleepBtn" aria-label="Sleep timer"><svg class="icon"><use href="#i-moon"/></svg></button>
     </div>
   </div>
@@ -315,6 +335,6 @@
 <div class="toast hidden" id="toast"></div>
 <div class="busy hidden" id="busy"></div>
 
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

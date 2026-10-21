@@ -2,10 +2,11 @@
    Books, audio, highlights and reading positions are stored on the device only. */
 'use strict';
 
-const VERSION = '7 (20 Oct)';
+const VERSION = '8 (21 Oct)';
 const $ = (s) => document.querySelector(s);
 const audio = $('#audio');
-const SPEEDS = [0.8, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.5, 4];
+const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 4.5];
+const MIN_SPEED = 0.5, MAX_SPEED = 4.5;
 const SLEEP = [['Off', 0], ['10 min', 10], ['15 min', 15], ['30 min', 30], ['45 min', 45], ['60 min', 60], ['End of chapter', -1]];
 
 let book = null;          // current book's text + timings
@@ -54,14 +55,59 @@ const pref = {
 
 /* ---------------------------------------------------------------- helpers */
 
-const pos = () => (pending !== null ? pending : audio.currentTime);
+// Where the book is. Jumps are checked until they land: iPhones sometimes ignore a jump
+// (before the audio has loaded, or in a big file) and play from the beginning instead.
+// Each jump is retried, and as a last resort the audio is reloaded starting at that point.
+let seekWant = null, seekTries = 0, seekTimer = null, audioURL = null;
+const pos = () => (pending !== null ? pending : seekWant !== null ? seekWant : audio.currentTime);
+const bookLength = () => Math.max(isFinite(audio.duration) ? audio.duration : 0, (book && book.duration) || 0);
 function setPos(t) {
-  if (audio.readyState >= 1) { audio.currentTime = t; pending = null; } else pending = t;
+  clearTimeout(seekTimer);
+  if (audio.readyState >= 1) {
+    pending = null; seekWant = t; seekTries = 0;
+    try { audio.currentTime = t; } catch {}
+    seekTimer = setTimeout(checkSeek, 350);
+  } else { pending = t; seekWant = null; }
 }
-audio.addEventListener('loadedmetadata', () => {
-  if (pending !== null) { audio.currentTime = pending; pending = null; }
-  if (book) onTime(true);
-});
+function checkSeek() {
+  clearTimeout(seekTimer);
+  if (seekWant === null) return;
+  if (Math.abs(audio.currentTime - seekWant) < 1.5) { seekWant = null; if (book) onTime(true); return; }
+  if (audio.seeking && seekTries < 6) { seekTries++; seekTimer = setTimeout(checkSeek, 400); return; }
+  seekTries++;
+  if (seekTries <= 3) { try { audio.currentTime = seekWant; } catch {} seekTimer = setTimeout(checkSeek, 400 * seekTries); return; }
+  reloadAt(seekWant);
+}
+// Last resort: load the audio again, starting at time t (a "#t=" link works even when jumping doesn't).
+function reloadAt(t) {
+  if (!audioURL) { seekWant = null; return; }
+  const playing = !audio.paused;
+  seekWant = null; pending = t;
+  audio.src = audioURL + '#t=' + t.toFixed(2);
+  audio.load();
+  if (playing) audio.play().catch(() => {});
+}
+audio.addEventListener('seeked', () => { if (seekWant !== null) checkSeek(); });
+// A jump made before the audio was ready: apply it as soon as it can be (and again when it
+// can play, as some iPhones ignore a jump made the moment the length is known).
+function applyPending() {
+  if (pending === null || audio.readyState < 1) return;
+  const t = pending; pending = null; setPos(t);
+}
+['loadedmetadata', 'loadeddata', 'canplay'].forEach((ev) => audio.addEventListener(ev, () => { applyPending(); if (book) onTime(true); }));
+
+// Where the voice is right now, for the highlight. Between the player's own updates it is
+// projected forward so the highlight moves smoothly, less the "highlight timing" setting
+// (Bluetooth headphones such as AirPods play a little after the phone does).
+const clock = { raw: -1, at: 0 };
+const lag = () => pref.get('lag', 0);
+function voiceTime() {
+  const raw = pos();
+  if (audio.paused || audio.seeking || seekWant !== null || pending !== null) { clock.raw = -1; return raw; }
+  const now = performance.now();
+  if (raw !== clock.raw) { clock.raw = raw; clock.at = now; return Math.max(0, raw - lag()); }
+  return Math.max(0, raw + Math.min(0.35, (now - clock.at) / 1000) * audio.playbackRate - lag());
+}
 
 function fmt(sec) {
   sec = Math.max(0, Math.floor(sec || 0));
@@ -83,7 +129,7 @@ function findAt(list, t, key) {
   return ans;
 }
 const chapterAt = (t) => findAt(book.chapters, t, 'start');
-const chapterEnd = (ci) => (ci + 1 < book.chapters.length ? book.chapters[ci + 1].start : audio.duration || Infinity);
+const chapterEnd = (ci) => (ci + 1 < book.chapters.length ? book.chapters[ci + 1].start : bookLength() || Infinity);
 
 /* ---------------------------------------------------------------- library */
 
@@ -180,8 +226,10 @@ async function openBook(id) {
   busy('Opening…');
   book = await get('books', id);
   const blob = await loadAudio(book);
-  if (audio.src) URL.revokeObjectURL(audio.src);
-  if (blob) audio.src = URL.createObjectURL(blob); else audio.removeAttribute('src');
+  if (audioURL) URL.revokeObjectURL(audioURL);
+  audioURL = blob ? URL.createObjectURL(blob) : null;
+  seekWant = null; clearTimeout(seekTimer);
+  if (audioURL) audio.src = audioURL; else audio.removeAttribute('src');
   if (!book.chunks) needsReAdd();
   audio.playbackRate = pref.get('speed', 1); audio.preservesPitch = true;
   pref.set('opened:' + id, Date.now());
@@ -192,6 +240,7 @@ async function openBook(id) {
   await renderMarks();
   $('#library').classList.add('hidden');
   $('#reader').classList.remove('hidden');
+  sizePanels();
   updateSpeed();
   pending = null;
   setPos(pref.get('pos:' + id, 0));
@@ -200,6 +249,7 @@ async function openBook(id) {
   onTime(true);
   busy();
   setupMediaSession();
+  updateUnsent();
   estCache.clear();
   if (!hasExactWords() && !pref.get('wordsWarned:' + id, false)) {
     pref.set('wordsWarned:' + id, true);
@@ -296,14 +346,22 @@ function wordTime(i, k) {
   const w = wordStarts(i);
   return book.paras[i].s + (w[Math.min(k, w.length - 1)] || 0) / 100;
 }
-const paraEnd = (i) => (i + 1 < book.paras.length ? book.paras[i + 1].s : (audio.duration || book.duration || book.paras[i].s + 20));
+const paraEnd = (i) => (i + 1 < book.paras.length ? book.paras[i + 1].s : (bookLength() || book.paras[i].s + 20));
 
 function hideWord() { wordIdx = -1; wordBox.classList.add('hidden'); }
-function updateWord(force) {
+// Paragraph, word and speed reader all follow the same moment, every frame.
+function syncView(force) {
+  if (!book) return;
+  const t = voiceTime();
+  setCurrent(findAt(book.paras, t, 's'));
+  updateWord(force, t);
+  if (rsvpOn && !rsvpRunning) rsvpFollow(t);
+}
+function updateWord(force, t = voiceTime()) {
   if (!book || cur < 0 || !paraEls[cur]) return;
   const p = book.paras[cur];
   if (wordPara !== cur) { wordPara = cur; wordRanges = wordSpans(p.t); wordIdx = -1; }
-  const k = wordIndexAt(cur, pos());
+  const k = wordIndexAt(cur, t);
   if ((k === wordIdx && !force) || !wordRanges[k]) return;
   wordIdx = k;
   const r = textRange(paraEls[cur], wordRanges[k][0], wordRanges[k][1]);
@@ -326,7 +384,7 @@ function updateWord(force) {
 let ticking = false;
 function tick() {
   if (audio.paused || !book) { ticking = false; return; }
-  if (!document.hidden) { updateWord(); if (rsvpOn) rsvpFollow(); }
+  if (!document.hidden) syncView();
   requestAnimationFrame(tick);
 }
 function startTick() { if (!ticking) { ticking = true; requestAnimationFrame(tick); } }
@@ -335,9 +393,7 @@ let lastSave = 0, lastChapter = -1, lastT = 0;
 function onTime(force) {
   if (!book) return;
   const t = pos();
-  setCurrent(findAt(book.paras, t, 's'));
-  updateWord(force);
-  if (rsvpOn && !rsvpRunning) rsvpFollow();
+  syncView(force);
   const ci = chapterAt(t);
   const start = book.chapters[ci].start, end = chapterEnd(ci);
   // Played (not jumped) into the next chapter: offer the quiz on the one just finished.
@@ -353,31 +409,54 @@ function onTime(force) {
     $('#rsvpChap').textContent = `${ci + 1} of ${book.chapters.length} · ${book.chapters[ci].title}`;
     updateMediaMeta();
   }
-  const total = audio.duration || book.duration;
+  const total = bookLength();
   $('#bookPct').textContent = total ? `${Math.min(100, Math.floor((t / total) * 100))}% of book` : '';
   if (!seeking) $('#seek').value = Math.round(((t - start) / Math.max(1, end - start)) * 1000);
   $('#tNow').textContent = fmt(t - start);
   $('#tLeft').textContent = `-${fmt((end - t) / audio.playbackRate)} in chapter`;
   if (Date.now() - lastSave > 4000 || force) savePos();
   checkSleep(t);
-  if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && audio.duration) {
-    try { navigator.mediaSession.setPositionState({ duration: audio.duration, position: Math.min(t, audio.duration), playbackRate: audio.playbackRate }); } catch {}
+  if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && total) {
+    try { navigator.mediaSession.setPositionState({ duration: total, position: Math.min(t, total), playbackRate: audio.playbackRate }); } catch {}
   }
 }
 function savePos() { if (book && (audio.readyState >= 1 || pending !== null)) { pref.set('pos:' + book.id, pos()); lastSave = Date.now(); } }
 
 function seekTo(t, play) {
-  setPos(Math.max(0, Math.min(t, (audio.duration || book.duration || t) - 0.1)));
-  follow = true; $('#followBtn').classList.add('hidden');
+  setPos(Math.max(0, Math.min(t, (bookLength() || t + 1) - 0.1)));
+  follow = true; $('#followBar').classList.add('hidden');
   onTime(true);
-  if (play) audio.play();
+  const el = paraEls[cur]; if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (play) audio.play().catch(() => {});
 }
 
 /* ---------------------------------------------------------------- player controls */
 
 function togglePlay() {
   if (rsvpOn && pref.get('rsvpMode', 'voice') === 'silent') return rsvpRunning ? rsvpPause() : rsvpPlay();
-  audio.paused ? audio.play().catch(() => {}) : audio.pause();
+  if (!audio.paused) return audio.pause();
+  // Scrolled away from where it was reading? Play starts from what you're looking at.
+  if (!follow && !rsvpOn && !onScreen(paraEls[cur])) {
+    const i = paraInView();
+    if (i >= 0) return seekTo(book.paras[i].s, true);
+  }
+  audio.play().catch(() => {});
+}
+const readingArea = () => [$('header').getBoundingClientRect().bottom, $('#player').getBoundingClientRect().top];
+function onScreen(el) {
+  if (!el) return false;
+  const r = el.getBoundingClientRect(), [top, bottom] = readingArea();
+  return r.bottom > top + 10 && r.top < bottom - 10;
+}
+// The paragraph at the top third of the reading area.
+function paraInView() {
+  const [top, bottom] = readingArea(), y = top + (bottom - top) * 0.3;
+  let best = -1;
+  for (let i = 0; i < paraEls.length; i++) {
+    const r = paraEls[i].getBoundingClientRect();
+    if (r.bottom >= y) { best = i; break; }
+  }
+  return best;
 }
 // The audio can't be read (saved by an older version of Read Along): ask for the book again.
 let warned = null;
@@ -391,7 +470,8 @@ function updatePlayIcon() {
   $('#playIcon').setAttribute('href', audio.paused ? '#i-play' : '#i-pause');
   $('#playBtn').setAttribute('aria-label', audio.paused ? 'Play' : 'Pause');
 }
-function updateSpeed() { $('#speedBtn').textContent = audio.playbackRate + '×'; }
+const speedLabel = (r) => (Math.round(r * 100) / 100) + '×';
+function updateSpeed() { $('#speedBtn').textContent = speedLabel(audio.playbackRate); }
 
 let seeking = false;
 $('#seek').addEventListener('input', () => {
@@ -408,21 +488,57 @@ $('#seek').addEventListener('change', () => {
 $('#playBtn').onclick = () => { unlockChime(); togglePlay(); };
 $('#b15').onclick = () => seekTo(pos() - 15);
 $('#f15').onclick = () => seekTo(pos() + 15);
-function setSpeed(r) {
-  r = Math.round(Math.max(0.5, Math.min(4, r)) * 100) / 100;
+function setSpeed(r, quiet) {
+  r = Math.round(Math.max(MIN_SPEED, Math.min(MAX_SPEED, r)) * 20) / 20;   // steps of 0.05
   audio.playbackRate = r; audio.preservesPitch = true; audio.webkitPreservesPitch = true;
-  pref.set('speed', r); updateSpeed(); onTime(true);
+  updateSpeed();
+  if (!quiet) { pref.set('speed', r); onTime(true); }
+  return r;
 }
-$('#speedBtn').onclick = function speedSheet() {
-  const r = audio.playbackRate;
-  openSheet(`<h3>Speed <span style="font-variant-numeric:tabular-nums">${r}×</span></h3>
-    <div class="setrow"><span>Fine tune</span><div class="stepper"><button data-d="-0.1">−0.1</button><button data-d="0.1">+0.1</button></div></div>
-    <div class="chips" style="margin-top:14px">${SPEEDS.map((v) => `<button class="chip ${v === r ? 'on' : ''}" data-v="${v}">${v}×</button>`).join('')}</div>`,
-  (s) => {
-    s.querySelectorAll('[data-v]').forEach((b) => (b.onclick = () => { setSpeed(+b.dataset.v); closeSheet(); }));
-    s.querySelectorAll('[data-d]').forEach((b) => (b.onclick = () => { setSpeed(audio.playbackRate + +b.dataset.d); speedSheet(); }));
+// Speed button: press and slide your finger up (faster) or down (slower). A plain tap opens the slider.
+(() => {
+  const btn = $('#speedBtn'), bubble = $('#speedBubble');
+  let drag = null;
+  btn.addEventListener('pointerdown', (e) => {
+    drag = { y: e.clientY, r: audio.playbackRate, moved: false };
+    try { btn.setPointerCapture(e.pointerId); } catch {}
   });
-};
+  btn.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const dy = drag.y - e.clientY;
+    if (!drag.moved && Math.abs(dy) < 8) return;
+    drag.moved = true;
+    const r = setSpeed(drag.r + Math.round(dy / 9) * 0.05, true);   // every 9 px = 0.05×
+    bubble.innerHTML = `<b>${speedLabel(r)}</b><small>Slide up: faster · down: slower</small>`;
+    bubble.classList.remove('hidden');
+  });
+  const end = () => {
+    if (!drag) return;
+    const moved = drag.moved; drag = null;
+    bubble.classList.add('hidden');
+    if (moved) setSpeed(audio.playbackRate); else speedSheet();
+  };
+  btn.addEventListener('pointerup', end);
+  btn.addEventListener('pointercancel', end);
+})();
+function speedSheet() {
+  const r = audio.playbackRate;
+  openSheet(`<h3>Speed <span class="bigspeed" id="spVal">${speedLabel(r)}</span></h3>
+    <input type="range" class="speedslider" id="spSlide" min="${MIN_SPEED}" max="${MAX_SPEED}" step="0.05" value="${r}" aria-label="Speed">
+    <div class="spscale"><span>${MIN_SPEED}×</span><span>1×</span><span>2×</span><span>3×</span><span>4×</span><span>${MAX_SPEED}×</span></div>
+    <div class="setrow"><span>Fine tune</span><div class="stepper"><button data-d="-0.05">−</button><button data-d="0.05">+</button></div></div>
+    <div class="chips" style="margin-top:14px">${SPEEDS.map((v) => `<button class="chip ${v === r ? 'on' : ''}" data-v="${v}">${v}×</button>`).join('')}</div>
+    <p class="tip">Quick way: press the speed button and slide your finger up or down.</p>`,
+  (s) => {
+    const slide = s.querySelector('#spSlide'), val = s.querySelector('#spVal');
+    slide.oninput = () => { val.textContent = speedLabel(setSpeed(+slide.value, true)); };
+    slide.onchange = () => setSpeed(+slide.value);
+    s.querySelectorAll('[data-v]').forEach((b) => (b.onclick = () => { setSpeed(+b.dataset.v); closeSheet(); }));
+    s.querySelectorAll('[data-d]').forEach((b) => (b.onclick = () => {
+      const v = setSpeed(audio.playbackRate + +b.dataset.d); slide.value = v; val.textContent = speedLabel(v);
+    }));
+  });
+}
 audio.addEventListener('timeupdate', () => onTime(false));
 audio.addEventListener('play', () => {
   // Audio started (e.g. from AirPods) while silent speed reading: follow the voice instead.
@@ -444,14 +560,15 @@ $('#text').addEventListener('click', (e) => {
 function handScroll() {
   if ($('#reader').classList.contains('hidden') || !follow) return;
   follow = false;
-  $('#followBtn').classList.remove('hidden');
+  $('#followBar').classList.remove('hidden');
 }
 window.addEventListener('touchmove', handScroll, { passive: true });
 window.addEventListener('wheel', handScroll, { passive: true });
 $('#followBtn').onclick = () => {
-  follow = true; $('#followBtn').classList.add('hidden');
+  follow = true; $('#followBar').classList.add('hidden');
   const el = paraEls[cur]; if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
 };
+$('#playHere').onclick = () => { unlockChime(); const i = paraInView(); if (i >= 0) seekTo(book.paras[i].s, true); };
 
 /* ---------------------------------------------------------------- sleep timer */
 
@@ -484,21 +601,81 @@ async function addHighlight(para, quote, note, source) {
               chapter: book.chapters[chapterAt(book.paras[para].s)].title, created: Date.now(), source };
   await put('highlights', h);
   await renderMarks();
+  updateUnsent();
   return h;
 }
-
-// AirPods double-press: keep the paragraph you were just listening to.
-async function captureHeard() {
+// Highlights made since they were last sent to NotebookLM: shown as a number on the bookmark button.
+async function updateUnsent() {
   if (!book) return;
-  const t = pos();
-  let i = findAt(book.paras, t, 's');
-  if (t - book.paras[i].s < 4 && i > 0) i -= 1;   // only just started this one? keep the last
-  if (book.paras[i].h && i + 1 < book.paras.length) i += 1;
-  const existing = (await byBook(book.id)).find((h) => h.para === i && h.quote === book.paras[i].t.trim());
-  if (!existing) await addHighlight(i, book.paras[i].t, '', 'airpods');
-  chime();
-  toast('Highlight saved');
+  const sent = pref.get('sentAt:' + book.id, 0);
+  const n = (await byBook(book.id)).filter((h) => h.created > sent).length;
+  const b = $('#hlBtn'); b.dataset.n = n || ''; b.classList.toggle('badge', n > 0);
 }
+
+const ABBREV = /(?:\b(?:Mr|Mrs|Ms|Dr|St|Jr|Sr|Prof|Rev|Fr|Gen|Col|Capt|Lt|vs|etc|cf|al|Vol|No|pp?|ch|ed|eds|ca)|\b[A-Za-z])\.$/;
+// Sentences in a paragraph, as [start, end] character positions.
+function sentencesOf(text) {
+  const out = [], re = /[^.!?]+(?:[.!?]+["'”’)\]]*)?/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const a = m.index + (m[0].length - m[0].trimStart().length), b = m.index + m[0].trimEnd().length;
+    if (b <= a) continue;
+    // "Dr." "St." "J." etc. don't end a sentence: join with what follows.
+    const prev = out[out.length - 1];
+    if (prev && ABBREV.test(text.slice(prev[0], prev[1]))) prev[1] = b; else out.push([a, b]);
+  }
+  return out.length ? out : [[0, text.length]];
+}
+// The sentence the voice is on (paragraph i, sentence index), stepping back to the one before
+// if it has only just started: you tap after hearing something, not before.
+function heardSentence() {
+  const t = voiceTime();
+  let i = findAt(book.paras, t, 's');
+  const sents = sentencesOf(book.paras[i].t), spans = wordSpans(book.paras[i].t);
+  const at = (spans[wordIndexAt(i, t)] || [0])[0];
+  let si = sents.findIndex(([, b]) => at < b); if (si < 0) si = sents.length - 1;
+  const firstWord = Math.max(0, spans.findIndex(([a]) => a >= sents[si][0]));
+  const heard = (t - wordTime(i, firstWord)) / audio.playbackRate;    // seconds of listening
+  if (heard < 1.5 || book.paras[i].h) return stepBack(i, si);
+  return [i, si];
+}
+function stepBack(i, si) {
+  if (si > 0) return [i, si - 1];
+  for (let j = i - 1; j >= 0; j--) if (!book.paras[j].h) return [j, sentencesOf(book.paras[j].t).length - 1];
+  return [i, 0];
+}
+// Highlight button (and AirPods double-press): keep the sentence you just heard.
+// Tap again within 10 seconds to add the sentence before it too.
+let lastKeep = null;
+async function keepHeard(source) {
+  if (!book) return;
+  if (lastKeep && lastKeep.book === book.id && Date.now() - lastKeep.at < 10000) {
+    const [j, sj] = stepBack(lastKeep.para, lastKeep.from);
+    if (j === lastKeep.para && sj < lastKeep.from) {
+      const h = await get('highlights', lastKeep.id), sents = sentencesOf(book.paras[j].t);
+      h.quote = book.paras[j].t.slice(sents[sj][0], sents[lastKeep.to][1]).trim();
+      await put('highlights', h); await renderMarks();
+      lastKeep = { ...lastKeep, from: sj, at: Date.now() };
+      chime(); return toast('Added the sentence before');
+    }
+    if (j !== lastKeep.para) {
+      const sents = sentencesOf(book.paras[j].t);
+      const h = await addHighlight(j, book.paras[j].t.slice(sents[sj][0], sents[sj][1]), '', source);
+      lastKeep = { book: book.id, id: h.id, para: j, from: sj, to: sj, at: Date.now() };
+      chime(); return toast('Added the sentence before');
+    }
+  }
+  const [i, si] = heardSentence(), sents = sentencesOf(book.paras[i].t);
+  const quote = book.paras[i].t.slice(sents[si][0], sents[si][1]).trim();
+  const existing = (await byBook(book.id)).find((h) => h.para === i && h.quote.includes(quote));
+  const h = existing || await addHighlight(i, quote, '', source);
+  lastKeep = { book: book.id, id: h.id, para: i, from: si, to: si, at: Date.now() };
+  chime();
+  toast(`Highlighted “${quote.length > 48 ? quote.slice(0, 46) + '…' : quote}”  Tap again to add the sentence before.`);
+  updateUnsent();
+}
+const captureHeard = () => keepHeard('airpods');
+$('#keepBtn').onclick = () => { unlockChime(); keepHeard('button'); };
 
 // Selection toolbar
 let selInfo = null;
@@ -562,7 +739,8 @@ async function showHighlights(tag) {
   reopen = () => showHighlights(tag);
   openSheet(`<h3>Highlights <button id="exportBtn">Share</button></h3>
     ${hls.length ? `<div class="sendbar"><button class="primary" id="nlmBtn">Send to NotebookLM</button></div>
-    <p class="tip" style="margin:0 0 12px">Save it to <b>iCloud Drive › Read Along</b>. Your Mac adds it to NotebookLM within the hour.</p>` : ''}
+    <p class="tip" style="margin:0 0 12px">${(() => { const sent = pref.get('sentAt:' + book.id, 0), n = hls.filter((h) => h.created > sent).length;
+      return n ? `<b>${n} new</b> since you last sent them. ` : (sent ? 'All sent. ' : ''); })()}Choose <b>Save to Files</b> → <b>iCloud Drive › Read Along</b>. Your Mac adds them to this book's NotebookLM notebook as “Highlights – ${esc(book.title.split(/[:(]/)[0].trim())}”.</p>` : ''}
     ${tags.length ? `<div class="chips"><button class="chip ${!tag ? 'on' : ''}" data-t="">All</button>${tags.map((t) =>
       `<button class="chip ${tag === t ? 'on' : ''}" data-t="${t}">${t}</button>`).join('')}</div>` : ''}
     ${shown.length ? shown.map(hlHTML).join('') : `<p class="tip">No highlights yet. Select text and tap <b>Highlight</b>, or double-press your AirPods while listening to keep what you just heard.</p>`}`,
@@ -591,10 +769,11 @@ function sendToNotebookLM(all) {
   let file = new File([md], base + '.md', { type: 'text/markdown' });
   if (!(navigator.canShare && navigator.canShare({ files: [file] }))) file = new File([md], base + '.txt', { type: 'text/plain' });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    navigator.share({ files: [file] }).then(() => toast('Saved. Your Mac adds it to NotebookLM within the hour.'))
-      .catch((e) => { if (e.name !== 'AbortError') download(file); });
-  } else download(file);
+    navigator.share({ files: [file] }).then(() => { markSent(); toast('Saved. Your Mac adds it to NotebookLM in a minute or two.'); })
+      .catch((e) => { if (e.name !== 'AbortError') { download(file); markSent(); } });
+  } else { download(file); markSent(); }
 }
+function markSent() { pref.set('sentAt:' + book.id, Date.now()); updateUnsent(); reopen(); }
 function download(file) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name;
   document.body.appendChild(a); a.click(); a.remove();
@@ -685,6 +864,10 @@ $('#tocBtn').onclick = () => {
 $('#hlBtn').onclick = () => showHighlights('');
 $('#chapBar').onclick = () => $('#tocBtn').onclick();
 
+function lagText() {
+  const l = lag();
+  return l === 0 ? 'Exact' : l > 0 ? `${Math.round(l * 1000)} ms later` : `${Math.round(-l * 1000)} ms earlier`;
+}
 function applyLook() {
   document.documentElement.style.setProperty('--text-size', pref.get('size', 19) + 'px');
   const th = pref.get('theme', 'auto');
@@ -701,6 +884,8 @@ $('#setBtn').onclick = function settings() {
     <div class="chips">${[['auto', 'Match phone'], ['light', 'Light'], ['sepia', 'Sepia'], ['dark', 'Dark']].map(([k, l]) =>
       `<button class="chip ${th === k ? 'on' : ''}" data-t="${k}">${l}</button>`).join('')}</div>
     <div class="setrow"><span>Quiz after each chapter</span><div class="seg"><button data-q="1" class="${pref.get('quiz', true) ? 'on' : ''}">On</button><button data-q="0" class="${pref.get('quiz', true) ? '' : 'on'}">Off</button></div></div>
+    <div class="setrow"><span>Highlight timing<small class="sublabel" id="lagVal">${lagText()}</small></span><div class="stepper"><button data-l="-0.05">Earlier</button><button data-l="0.05">Later</button></div></div>
+    <p class="tip" style="margin-top:6px">If the highlight runs ahead of the voice (common with AirPods and other Bluetooth headphones), tap <b>Later</b> until they match.</p>
     <p class="tip">Read Along version ${VERSION}${book ? ` · Word timing for this book: ${hasExactWords() ? '<b>exact</b>' : '<b>estimated</b> (add the book again for exact timing)'}` : ''}</p>
     <p class="tip"><b>AirPods:</b> press once to play or pause. <b>Double-press</b> to keep what you just heard as a highlight. <b>Triple-press</b> to go back 15 seconds.</p>`,
   (s) => {
@@ -709,6 +894,10 @@ $('#setBtn').onclick = function settings() {
     }));
     s.querySelectorAll('[data-t]').forEach((b) => (b.onclick = () => { pref.set('theme', b.dataset.t); applyLook(); settings(); }));
     s.querySelectorAll('[data-q]').forEach((b) => (b.onclick = () => { pref.set('quiz', b.dataset.q === '1'); settings(); }));
+    s.querySelectorAll('[data-l]').forEach((b) => (b.onclick = () => {
+      pref.set('lag', Math.round(Math.max(-0.5, Math.min(1, lag() + +b.dataset.l)) * 100) / 100);
+      s.querySelector('#lagVal').textContent = lagText(); syncView(true);
+    }));
   });
 };
 
@@ -747,9 +936,9 @@ function showChunk(i, k) {
   const half = Math.min(innerWidth - 32, 600) / 2;
   $('#rsvpWord').style.setProperty('--rsvp-size', Math.max(20, Math.min(48, half / (longest * 0.56))) + 'px');
 }
-function rsvpFollow() {
+function rsvpFollow(t = voiceTime()) {
   if (!rsvpOn || rsvpRunning || !book) return;
-  const t = pos(), i = findAt(book.paras, t, 's');
+  const i = findAt(book.paras, t, 's');
   showChunk(i, wordIndexAt(i, t));
   rsvpState();
 }
@@ -829,7 +1018,7 @@ function openRsvp() {
 function closeRsvp() {
   rsvpPause(); rsvpOn = false;
   $('#rsvp').classList.add('hidden'); $('#rsvpBtn').classList.remove('on');
-  follow = true; $('#followBtn').classList.add('hidden');
+  follow = true; $('#followBar').classList.add('hidden');
   const el = paraEls[cur]; if (el) el.scrollIntoView({ block: 'center' });
   updateWord(true);
 }
@@ -844,10 +1033,11 @@ function currentPassage() {
   if (book.paras[i].h && book.paras[i + 1]) i += 1;
   return book.paras[i].t;
 }
-function askText(passage, q) {
+function askText(passage, q, forNotebook) {
   const chap = book.chapters[chapterAt(pos())].title;
+  const mine = forNotebook ? `\n\n(My own highlights and notes for this book are in the source "Highlights – ${book.title.split(/[:(]/)[0].trim()}". Use them where they help.)` : '';
   return `I'm reading "${book.title}"${book.author ? ` by ${book.author}` : ''}, chapter "${chap}".\n\n` +
-    `Passage:\n"${passage.slice(0, 2500)}"\n\n${q || 'Explain this passage and how it fits the main ideas of the book.'}`;
+    `Passage:\n"${passage.slice(0, 2500)}"\n\n${q || 'Explain this passage and how it fits the main ideas of the book.'}${mine}`;
 }
 function askSheet(passage) {
   passage = (passage || currentPassage()).trim();
@@ -865,7 +1055,7 @@ function askSheet(passage) {
     const q = s.querySelector('#askQ');
     s.querySelectorAll('[data-q]').forEach((c) => (c.onclick = () => { q.value = c.dataset.q; }));
     s.querySelector('#askNlm').onclick = () => {
-      const text = askText(passage, q.value.trim());
+      const text = askText(passage, q.value.trim(), true);
       if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
       window.open(nb && nb.id ? `https://notebooklm.google.com/notebook/${nb.id}` : 'https://notebooklm.google.com/', '_blank');
       toast('Question copied. Paste it into NotebookLM.');
