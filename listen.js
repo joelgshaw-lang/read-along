@@ -34,6 +34,7 @@ $('#tabBooks').onclick = () => showTab('books');
 $('#tabListen').onclick = () => showTab('listen');
 function listenLibrary() { showTab(pref.get('tab', 'books')); }
 listenLibrary();
+$('#verNum').textContent = VERSION;
 
 async function listPieces() {
   const list = (await all('pieces')).sort((a, b) => pref.get('lopened:' + b.id, b.added) - pref.get('lopened:' + a.id, a.added));
@@ -303,7 +304,6 @@ function showPiece(p) {
   updateTimes();
   scrollTo(0, 0);
   requestAnimationFrame(() => markSentence(true, true));
-  if (studioOn()) kLoad().catch(() => {});
   setupListenMedia();
 }
 
@@ -350,8 +350,8 @@ function voiceSheet() {
   list.sort((a, b) => quality(b) - quality(a) || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name));
   openSheet(`<h3>Voice</h3>
     <p class="vhead">Studio voices <small>the same voices as your audiobooks</small></p>
-    <div id="kStat"></div>
-    ${STUDIO.map(([id, name, kind]) => `<button class="voice kv ${studioOn() && kv === id ? 'on' : ''}" data-k="${id}">${name}<small>${kind}</small></button>`).join('')}
+    ${IOS ? `<p class="tip" style="margin-top:0">Studio voices are too big to run inside an iPhone's browser (they made the app crash), so they're switched off on this phone for now.</p>` : `<div id="kStat"></div>
+    ${STUDIO.map(([id, name, kind]) => `<button class="voice kv ${studioOn() && kv === id ? 'on' : ''}" data-k="${id}">${name}<small>${kind}</small></button>`).join('')}`}
     <p class="vhead" style="margin-top:18px">Phone voices <small>instant, no download</small></p>
     ${list.length ? list.map((v) => `<button class="voice ${cur && v.voiceURI === cur.voiceURI ? 'on' : ''}" data-v="${esc(v.voiceURI)}">${label(v)}</button>`).join('') : '<p>No English voices found yet. Close this and try again in a moment.</p>'}
     <p class="tip"><b>Better voices, free:</b> on your iPhone open <b>Settings → Accessibility → Read & Speak (Spoken Content) → Voices → English</b>, pick a voice marked <b>Premium</b> or <b>Enhanced</b> and download it. Then close and reopen Read Along.</p>
@@ -573,7 +573,13 @@ const K = {
   audio: $('#laudio'), worker: null, ready: null, state: pref.get('kHave', false) ? 'cached' : 'off',
   pct: 0, device: null, err: '', clips: new Map(), queue: [], busy: false, seq: 0, waiters: new Map(), cur: null, raf: 0, unlocked: false,
 };
-function studioOn() { return pref.get('lengine', 'phone') === 'studio'; }
+// iPhones and iPads: the studio voice model is too big for their browser (it crashes the
+// page), so they use phone voices. Macs and computers can still use studio voices.
+const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+// If the last attempt to load studio voices never finished, the page crashed: don't try again.
+if (pref.get('kTrying', 0)) { pref.set('kTrying', 0); pref.set('lengine', 'phone'); pref.set('kCrashed', true); }
+if (IOS && pref.get('lengine', 'phone') === 'studio') pref.set('lengine', 'phone');
+function studioOn() { return !IOS && pref.get('lengine', 'phone') === 'studio'; }
 const kVoice = () => pref.get('lkvoice', 'bm_george');
 
 async function kDevice() {
@@ -587,16 +593,17 @@ function kLoad() {
   K.ready = (async () => {
     K.device = await kDevice();
     K.state = 'loading'; K.pct = 0; kStatus();
+    pref.set('kTrying', Date.now());
     vlog(`studio: loading (${K.device})`);
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
     return new Promise((ok, fail) => {
-      const bad = (msg) => { K.state = 'error'; K.err = msg; K.ready = null; vlog('studio error: ' + msg); kStatus(); fail(new Error(msg)); };
-      try { K.worker = new Worker('kokoro-worker.js?v=12', { type: 'module' }); } catch (e) { return bad('this phone can\'t run studio voices (' + e.message + ')'); }
+      const bad = (msg) => { pref.set('kTrying', 0); K.state = 'error'; K.err = msg; K.ready = null; vlog('studio error: ' + msg); kStatus(); fail(new Error(msg)); };
+      try { K.worker = new Worker('kokoro-worker.js?v=13', { type: 'module' }); } catch (e) { return bad('this phone can\'t run studio voices (' + e.message + ')'); }
       K.worker.onerror = (e) => bad(e.message || 'the voice didn\'t start');
       K.worker.onmessage = (e) => {
         const d = e.data;
         if (d.type === 'progress') { K.pct = Math.min(99, Math.round((d.loaded / d.total) * 100)); kStatus(); }
-        else if (d.type === 'ready') { K.state = 'ready'; pref.set('kHave', true); vlog(`studio: ready in ${Math.round(d.ms / 1000)}s`); kStatus(); ok(); }
+        else if (d.type === 'ready') { K.state = 'ready'; pref.set('kHave', true); pref.set('kTrying', 0); vlog(`studio: ready in ${Math.round(d.ms / 1000)}s`); kStatus(); ok(); }
         else if (d.type === 'audio' || d.type === 'error') {
           if (d.type === 'error' && d.of === 'load') return bad(d.error);
           const w = K.waiters.get(d.id); K.waiters.delete(d.id); K.busy = false;
