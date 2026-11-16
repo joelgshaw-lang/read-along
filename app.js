@@ -2,7 +2,7 @@
    Books, audio, highlights and reading positions are stored on the device only. */
 'use strict';
 
-const VERSION = '8 (21 Oct)';
+const VERSION = '9 (16 Nov)';
 const $ = (s) => document.querySelector(s);
 const audio = $('#audio');
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 4.5];
@@ -21,13 +21,13 @@ let wordPara = -1, wordIdx = -1, wordRanges = [];
 /* ---------------------------------------------------------------- storage */
 
 const db = new Promise((ok, fail) => {
-  const req = indexedDB.open('readalong', 1);
+  const req = indexedDB.open('readalong', 2);
   req.onupgradeneeded = () => {
-    const d = req.result;
-    d.createObjectStore('books', { keyPath: 'id' });
-    d.createObjectStore('audio');
-    const h = d.createObjectStore('highlights', { keyPath: 'id' });
-    h.createIndex('book', 'book');
+    const d = req.result, has = (n) => d.objectStoreNames.contains(n);
+    if (!has('books')) d.createObjectStore('books', { keyPath: 'id' });
+    if (!has('audio')) d.createObjectStore('audio');
+    if (!has('highlights')) d.createObjectStore('highlights', { keyPath: 'id' }).createIndex('book', 'book');
+    if (!has('pieces')) d.createObjectStore('pieces', { keyPath: 'id' });   // pasted text for Listen
   };
   req.onsuccess = () => ok(req.result);
   req.onerror = () => fail(req.error);
@@ -59,10 +59,52 @@ const pref = {
 // (before the audio has loaded, or in a big file) and play from the beginning instead.
 // Each jump is retried, and as a last resort the audio is reloaded starting at that point.
 let seekWant = null, seekTries = 0, seekTimer = null, audioURL = null;
-const pos = () => (pending !== null ? pending : seekWant !== null ? seekWant : audio.currentTime);
+
+// Sync report: a short diary of every jump, so a sync slip on the phone can be looked at later.
+const syncLog = pref.get('syncLog', []);
+function slog(msg) {
+  const d = new Date();
+  syncLog.push(`${d.getDate()}/${d.getMonth() + 1} ${d.toLocaleTimeString()} ${msg}`);
+  if (syncLog.length > 150) syncLog.splice(0, syncLog.length - 150);
+  pref.set('syncLog', syncLog);
+}
+const ts = (t) => (t == null ? '-' : fmt(t) + ' (' + t.toFixed(1) + 's)');
+
+// The guard: after every jump, and when play starts, watch the first few seconds of playing.
+// If the phone has quietly started somewhere else (usually the very start of the book),
+// put the voice back where the words are. Until it's confirmed, the words stay put and
+// the wrong spot is never saved as your place.
+let guard = null;   // { t: where the voice should be, since: when playing started, fixes }
+function armGuard(t, keepFixes) { guard = { t, since: null, fixes: keepFixes && guard ? guard.fixes : 0 }; }
+function guardExpect() {
+  if (!guard) return null;
+  return guard.since === null ? guard.t : guard.t + ((performance.now() - guard.since) / 1000) * audio.playbackRate;
+}
+function guardCheck() {
+  if (!guard || !book || audio.paused || audio.seeking || seekWant !== null || pending !== null || audio.readyState < 2) return;
+  const now = performance.now();
+  if (guard.since === null) { guard.since = now; return; }
+  const expect = guardExpect(), off = audio.currentTime - expect;
+  if (Math.abs(off) > 3) {
+    guard.fixes++;
+    slog(`voice at ${ts(audio.currentTime)}, words at ${ts(expect)}: moving voice (try ${guard.fixes})`);
+    if (guard.fixes > 5) { slog('gave up: tap a paragraph to restart from there'); guard = null; return; }
+    const t = expect;
+    setPos(t, true);
+    return;
+  }
+  if (now - guard.since > 4000) { if (guard.fixes) slog(`in step at ${ts(audio.currentTime)}`); guard = null; }
+}
+const pos = () => {
+  if (pending !== null) return pending;
+  if (seekWant !== null) return seekWant;
+  const e = guardExpect();
+  return e !== null && Math.abs(audio.currentTime - e) > 3 ? e : audio.currentTime;
+};
 const bookLength = () => Math.max(isFinite(audio.duration) ? audio.duration : 0, (book && book.duration) || 0);
-function setPos(t) {
+function setPos(t, keepFixes) {
   clearTimeout(seekTimer);
+  armGuard(t, keepFixes);
   if (audio.readyState >= 1) {
     pending = null; seekWant = t; seekTries = 0;
     try { audio.currentTime = t; } catch {}
@@ -76,13 +118,14 @@ function checkSeek() {
   if (audio.seeking && seekTries < 6) { seekTries++; seekTimer = setTimeout(checkSeek, 400); return; }
   seekTries++;
   if (seekTries <= 3) { try { audio.currentTime = seekWant; } catch {} seekTimer = setTimeout(checkSeek, 400 * seekTries); return; }
+  slog(`jump to ${ts(seekWant)} ignored (voice at ${ts(audio.currentTime)}): reloading audio there`);
   reloadAt(seekWant);
 }
 // Last resort: load the audio again, starting at time t (a "#t=" link works even when jumping doesn't).
 function reloadAt(t) {
   if (!audioURL) { seekWant = null; return; }
   const playing = !audio.paused;
-  seekWant = null; pending = t;
+  seekWant = null; pending = t; armGuard(t, true);
   audio.src = audioURL + '#t=' + t.toFixed(2);
   audio.load();
   if (playing) audio.play().catch(() => {});
@@ -92,7 +135,7 @@ audio.addEventListener('seeked', () => { if (seekWant !== null) checkSeek(); });
 // can play, as some iPhones ignore a jump made the moment the length is known).
 function applyPending() {
   if (pending === null || audio.readyState < 1) return;
-  const t = pending; pending = null; setPos(t);
+  const t = pending, keep = guard; pending = null; setPos(t, !!keep);
 }
 ['loadedmetadata', 'loadeddata', 'canplay'].forEach((ev) => audio.addEventListener(ev, () => { applyPending(); if (book) onTime(true); }));
 
@@ -137,8 +180,10 @@ async function showLibrary() {
   closeSheet();
   if (book) { savePos(); audio.pause(); }
   $('#reader').classList.add('hidden');
+  $('#listen').classList.add('hidden');
   $('#library').classList.remove('hidden');
   document.title = 'Read Along';
+  if (typeof listenLibrary === 'function') listenLibrary();
   const books = (await all('books')).sort((a, b) => (pref.get('opened:' + b.id, 0) - pref.get('opened:' + a.id, 0)));
   const list = $('#books');
   if (!books.length) {
@@ -243,6 +288,7 @@ async function openBook(id) {
   sizePanels();
   updateSpeed();
   pending = null;
+  slog(`opened "${book.title.slice(0, 30)}" at ${ts(pref.get('pos:' + id, 0))}`);
   setPos(pref.get('pos:' + id, 0));
   follow = true;
   setCurrent(findAt(book.paras, pos(), 's'), true);   // jump straight to where you were
@@ -539,12 +585,24 @@ function speedSheet() {
     }));
   });
 }
-audio.addEventListener('timeupdate', () => onTime(false));
+audio.addEventListener('timeupdate', () => { guardCheck(); onTime(false); });
+// Play has really started: check it started in the right place (iPhones often begin at 0:00).
+audio.addEventListener('playing', () => {
+  if (!book) return;
+  const want = pos();
+  if (!guard) armGuard(want);
+  guard.since = null;
+  if (Math.abs(audio.currentTime - guard.t) > 3 && seekWant === null && pending === null) {
+    slog(`play started at ${ts(audio.currentTime)}, words at ${ts(guard.t)}: moving voice`);
+    setPos(guard.t, true);
+  }
+});
+audio.addEventListener('waiting', () => { if (guard && guard.since !== null) { guard.t = guardExpect(); guard.since = null; } });
 audio.addEventListener('play', () => {
   // Audio started (e.g. from AirPods) while silent speed reading: follow the voice instead.
   if (rsvpRunning) { rsvpPause(); pref.set('rsvpMode', 'voice'); rsvpOptions(); }
   updatePlayIcon(); startTick(); rsvpState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
-audio.addEventListener('pause', () => { updatePlayIcon(); savePos(); rsvpState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
+audio.addEventListener('pause', () => { if (guard && guard.since !== null) { guard.t = guardExpect(); guard.since = null; } updatePlayIcon(); savePos(); rsvpState(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
 
 // Tap a paragraph to listen from there (but not while selecting text).
 $('#text').addEventListener('click', (e) => {
@@ -819,7 +877,7 @@ function setupMediaSession() {
   if (!('mediaSession' in navigator)) return;
   const ms = navigator.mediaSession;
   const set = (a, fn) => { try { ms.setActionHandler(a, fn); } catch {} };
-  set('play', () => audio.play());
+  set('play', () => { if (audio.paused) togglePlay(); });   // same checks as the play button
   set('pause', () => audio.pause());
   set('nexttrack', () => captureHeard());                          // AirPods double-press
   set('previoustrack', () => seekTo(pos() - 15));       // AirPods triple-press
@@ -887,6 +945,7 @@ $('#setBtn').onclick = function settings() {
     <div class="setrow"><span>Highlight timing<small class="sublabel" id="lagVal">${lagText()}</small></span><div class="stepper"><button data-l="-0.05">Earlier</button><button data-l="0.05">Later</button></div></div>
     <p class="tip" style="margin-top:6px">If the highlight runs ahead of the voice (common with AirPods and other Bluetooth headphones), tap <b>Later</b> until they match.</p>
     <p class="tip">Read Along version ${VERSION}${book ? ` · Word timing for this book: ${hasExactWords() ? '<b>exact</b>' : '<b>estimated</b> (add the book again for exact timing)'}` : ''}</p>
+    <div class="sendbar" style="margin-top:12px"><button id="syncRep">Sync report</button></div>
     <p class="tip"><b>AirPods:</b> press once to play or pause. <b>Double-press</b> to keep what you just heard as a highlight. <b>Triple-press</b> to go back 15 seconds.</p>`,
   (s) => {
     s.querySelectorAll('[data-s]').forEach((b) => (b.onclick = () => {
@@ -894,12 +953,26 @@ $('#setBtn').onclick = function settings() {
     }));
     s.querySelectorAll('[data-t]').forEach((b) => (b.onclick = () => { pref.set('theme', b.dataset.t); applyLook(); settings(); }));
     s.querySelectorAll('[data-q]').forEach((b) => (b.onclick = () => { pref.set('quiz', b.dataset.q === '1'); settings(); }));
+    s.querySelector('#syncRep').onclick = showSyncReport;
     s.querySelectorAll('[data-l]').forEach((b) => (b.onclick = () => {
       pref.set('lag', Math.round(Math.max(-0.5, Math.min(1, lag() + +b.dataset.l)) * 100) / 100);
       s.querySelector('#lagVal').textContent = lagText(); syncView(true);
     }));
   });
 };
+
+// The diary of jumps. If the voice and words slip apart, copy it and paste it to Claude.
+function showSyncReport() {
+  const text = `Read Along ${VERSION}\n` + (book ? `Book: ${book.title}\nNow: voice ${ts(audio.currentTime)}, words ${ts(pos())}, loaded ${audio.readyState}\n` : '') + syncLog.slice(-60).join('\n');
+  openSheet(`<h3>Sync report</h3>
+    <p class="tip" style="margin-top:0">Every jump the voice makes. If the voice and words slip apart, tap <b>Copy</b> and paste it to Claude.</p>
+    <pre style="white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto;background:var(--bg);padding:10px;border-radius:10px">${esc(text)}</pre>
+    <div class="sendbar"><button id="srClear">Clear</button><button class="primary" id="srCopy">Copy</button></div>`,
+  (s) => {
+    s.querySelector('#srCopy').onclick = () => navigator.clipboard.writeText(text).then(() => toast('Copied'), () => toast('Couldn\'t copy: select the text instead'));
+    s.querySelector('#srClear').onclick = () => { syncLog.length = 0; pref.set('syncLog', []); closeSheet(); toast('Cleared'); };
+  });
+}
 
 /* ---------------------------------------------------------------- speed reader */
 
