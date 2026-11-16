@@ -2,7 +2,7 @@
    Books, audio, highlights and reading positions are stored on the device only. */
 'use strict';
 
-const VERSION = '13 (16 Nov)';
+const VERSION = '14 (16 Nov)';
 const $ = (s) => document.querySelector(s);
 const audio = $('#audio');
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 4.5];

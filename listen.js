@@ -345,32 +345,38 @@ function chosenVoice() {
   return list.sort((a, b) => rank(b) - rank(a))[0] || null;
 }
 function voiceSheet() {
-  const list = voices(), cur = studioOn() ? null : chosenVoice(), kv = pref.get('lkvoice', 'bm_george');
+  const list = voices(), cur = studioOn() ? null : chosenVoice(), kv = pref.get('lkvoice', 'bm_george'), pv = pref.get('lpvoice', 'Olivia');
   const label = (v) => `${esc(v.name.replace(/\s*\((Enhanced|Premium)\)/i, ''))}<small>${esc(v.lang)}${quality(v) === 2 ? ' · Premium' : quality(v) === 1 ? ' · Enhanced' : ''}</small>`;
   list.sort((a, b) => quality(b) - quality(a) || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name));
   openSheet(`<h3>Voice</h3>
-    <p class="vhead">Studio voices <small>the same voices as your audiobooks</small></p>
+    <p class="vhead">Online voices <small>free, natural, need internet</small></p>
+    <div id="pStat"></div>
+    ${ONLINE.map(([id, , , kind]) => `<button class="voice pv ${onlineOn() && pv === id ? 'on' : ''}" data-p="${id}">${id}<small>${kind}</small></button>`).join('')}
+    <p class="vhead" style="margin-top:18px">Studio voices <small>the same voices as your audiobooks</small></p>
     ${IOS ? `<p class="tip" style="margin-top:0">Studio voices are too big to run inside an iPhone's browser (they made the app crash), so they're switched off on this phone for now.</p>` : `<div id="kStat"></div>
-    ${STUDIO.map(([id, name, kind]) => `<button class="voice kv ${studioOn() && kv === id ? 'on' : ''}" data-k="${id}">${name}<small>${kind}</small></button>`).join('')}`}
+    ${STUDIO.map(([id, name, kind]) => `<button class="voice kv ${kokoroOn() && kv === id ? 'on' : ''}" data-k="${id}">${name}<small>${kind}</small></button>`).join('')}`}
     <p class="vhead" style="margin-top:18px">Phone voices <small>instant, no download</small></p>
     ${list.length ? list.map((v) => `<button class="voice ${cur && v.voiceURI === cur.voiceURI ? 'on' : ''}" data-v="${esc(v.voiceURI)}">${label(v)}</button>`).join('') : '<p>No English voices found yet. Close this and try again in a moment.</p>'}
     <p class="tip"><b>Better voices, free:</b> on your iPhone open <b>Settings → Accessibility → Read & Speak (Spoken Content) → Voices → English</b>, pick a voice marked <b>Premium</b> or <b>Enhanced</b> and download it. Then close and reopen Read Along.</p>
     <div class="sendbar"><button id="vrCopy2">Copy voice check</button></div>`,
   (s) => {
     s.querySelector('#vrCopy2').onclick = () => navigator.clipboard.writeText(voiceReport()).then(() => toast('Copied: paste it to Claude'), () => toast('Couldn\'t copy'));
-    kStatus();
+    kStatus(); pStatus();
     s.querySelectorAll('.voice').forEach((b) => (b.onclick = () => {
-      const studio = !!b.dataset.k;
+      const studio = !!b.dataset.k, online = !!b.dataset.p;
       unlockSpeech(); kUnlockAudio();
       if (studio && K.state !== 'ready') { kLoad().catch(() => {}); if (K.state !== 'ready') return toast('Download the studio voices first'); }
+      if (online && !P.signedIn) return pSignIn();
       const wasPlaying = L.playing, at = L.word;
       if (wasPlaying) stopL();
-      pref.set('lengine', studio ? 'studio' : 'phone');
-      if (studio) pref.set('lkvoice', b.dataset.k); else { pref.set('lvoice', b.dataset.v); L.plainVoice = false; }
+      pref.set('lengine', studio ? 'studio' : online ? 'online' : 'phone');
+      if (studio) pref.set('lkvoice', b.dataset.k);
+      else if (online) pref.set('lpvoice', b.dataset.p);
+      else { pref.set('lvoice', b.dataset.v); L.plainVoice = false; }
       s.querySelectorAll('.voice').forEach((x) => x.classList.toggle('on', x === b));
       updateLSpeed();
       if (wasPlaying) speakAt(L.cur, at);
-      else if (studio) kSample(); else sample();
+      else if (studio || online) kSample(); else sample();
     }));
   });
 }
@@ -532,7 +538,7 @@ function updateLSpeed() { $('#lSpeed').textContent = (Math.round(pref.get('lrate
 $('#lSpeed').onclick = () => {
   const r = pref.get('lrate', 1), speeds = studioOn() ? [...LSPEEDS, 2.5, 3] : LSPEEDS;
   openSheet(`<h3>Speed</h3><div class="chips">${speeds.map((x) => `<button class="chip ${x === r ? 'on' : ''}" data-r="${x}">${x}×</button>`).join('')}</div>
-    <p class="tip">${studioOn() ? 'Studio voices go up to 3×.' : 'Phone voices go up to about 2×. Studio voices (microphone button) go up to 3×.'}</p>`,
+    <p class="tip">${studioOn() ? 'This voice goes up to 3×.' : 'Phone voices go up to about 2×. Online voices (microphone button) go up to 3×.'}</p>`,
   (s) => s.querySelectorAll('[data-r]').forEach((b) => (b.onclick = () => {
     pref.set('lrate', +b.dataset.r); updateLSpeed(); updateTimes(); closeSheet();
     if (studioOn()) K.audio.playbackRate = +b.dataset.r;
@@ -579,8 +585,11 @@ const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(na
 // If the last attempt to load studio voices never finished, the page crashed: don't try again.
 if (pref.get('kTrying', 0)) { pref.set('kTrying', 0); pref.set('lengine', 'phone'); pref.set('kCrashed', true); }
 if (IOS && pref.get('lengine', 'phone') === 'studio') pref.set('lengine', 'phone');
-function studioOn() { return !IOS && pref.get('lengine', 'phone') === 'studio'; }
-const kVoice = () => pref.get('lkvoice', 'bm_george');
+function kokoroOn() { return !IOS && pref.get('lengine', 'phone') === 'studio'; }
+function onlineOn() { return pref.get('lengine', 'phone') === 'online'; }
+// Studio or online voice: both play through the audio player, a line or two made ahead.
+function studioOn() { return kokoroOn() || onlineOn(); }
+const kVoice = () => (onlineOn() ? 'p:' + pref.get('lpvoice', 'Olivia') : pref.get('lkvoice', 'bm_george'));
 
 async function kDevice() {
   try { if (navigator.gpu && await navigator.gpu.requestAdapter()) return 'webgpu'; } catch {}
@@ -598,7 +607,7 @@ function kLoad() {
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
     return new Promise((ok, fail) => {
       const bad = (msg) => { pref.set('kTrying', 0); K.state = 'error'; K.err = msg; K.ready = null; vlog('studio error: ' + msg); kStatus(); fail(new Error(msg)); };
-      try { K.worker = new Worker('kokoro-worker.js?v=13', { type: 'module' }); } catch (e) { return bad('this phone can\'t run studio voices (' + e.message + ')'); }
+      try { K.worker = new Worker('kokoro-worker.js?v=14', { type: 'module' }); } catch (e) { return bad('this phone can\'t run studio voices (' + e.message + ')'); }
       K.worker.onerror = (e) => bad(e.message || 'the voice didn\'t start');
       K.worker.onmessage = (e) => {
         const d = e.data;
@@ -632,7 +641,7 @@ function kStatus() {
     if (go) go.onclick = () => { kUnlockAudio(); kLoad().catch(() => {}); };
     if (!K.device && K.state !== 'ready') kDevice().then((d) => { if (!K.device) { K.device = d; kStatus(); } });
   }
-  if (L.playing && studioOn() && K.state === 'loading' && L.piece) $('#lLeft').textContent = K.pct ? `voice downloading ${K.pct}%` : 'getting the voice ready…';
+  if (L.playing && kokoroOn() && K.state === 'loading' && L.piece) $('#lLeft').textContent = K.pct ? `voice downloading ${K.pct}%` : 'getting the voice ready…';
 }
 
 // Ask the background voice maker for one sentence. One at a time, in order.
@@ -656,7 +665,7 @@ function kClip(k) {
   const key = kVoice() + '|' + k;
   if (!K.clips.has(key)) {
     const text = L.sents[k].text.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
-    const p = kLoad().then(() => kMake(text, kVoice(), key)).then((d) => {
+    const p = onlineOn() ? pMake(text, key) : kLoad().then(() => kMake(text, kVoice(), key)).then((d) => {
       vlog(`made #${k}: ${d.secs.toFixed(1)}s of voice in ${(d.ms / 1000).toFixed(1)}s`);
       return { url: URL.createObjectURL(new Blob([d.wav], { type: 'audio/wav' })), secs: d.secs };
     });
@@ -673,7 +682,7 @@ function kAhead(k) {
     if (j < k - 3 || j > k + AHEAD + 6 || !key.startsWith(kVoice() + '|')) {
       // Not started yet: drop it from the queue too.
       K.clips.delete(key);
-      p.then((c) => URL.revokeObjectURL(c.url)).catch(() => {});
+      p.then((c) => c.url.startsWith('blob:') && URL.revokeObjectURL(c.url)).catch(() => {});
     }
   }
 }
@@ -754,9 +763,9 @@ function studioSpeak(k, from = 0) {
     K.audio.src = c.url;
     K.audio.playbackRate = pref.get('lrate', 1);
     K.audio.preservesPitch = true;
-    const start = from ? kFracAt(k, from) * c.secs : 0;
     const go = () => {
       if (my !== L.token) return;
+      const start = from ? kFracAt(k, from) * (K.audio.duration || c.secs) : 0;
       if (start) try { K.audio.currentTime = start; } catch {}
       K.audio.play().then(() => { updateTimes(); kTick(); }, (e) => {
         vlog('play blocked: ' + e.message);
@@ -768,7 +777,7 @@ function studioSpeak(k, from = 0) {
     clearTimeout(waitMsg);
     if (my !== L.token || e.message === 'skipped') return;
     stopL(); updateTimes();
-    toast('Studio voice problem: ' + e.message);
+    toast('Voice problem: ' + e.message);
   });
 }
 K.audio.addEventListener('ended', () => {
@@ -783,10 +792,11 @@ K.audio.addEventListener('pause', () => cancelAnimationFrame(K.raf));
 function kSample() {
   const my = ++L.token;
   kUnlockAudio();
-  kLoad().then(() => kMake('Hello Joel. This is how I sound reading to you.', kVoice())).then((d) => {
+  const hello = 'Hello Joel. This is how I sound reading to you.';
+  (onlineOn() ? pMake(hello) : kLoad().then(() => kMake(hello, kVoice())).then((d) => ({ url: URL.createObjectURL(new Blob([d.wav], { type: 'audio/wav' })) }))).then((c) => {
     if (my !== L.token) return;
     K.cur = null;
-    K.audio.src = URL.createObjectURL(new Blob([d.wav], { type: 'audio/wav' }));
+    K.audio.src = c.url;
     K.audio.playbackRate = 1;
     K.audio.play().catch(() => {});
   }, () => {});
@@ -803,3 +813,74 @@ function setupListenMedia() {
   set('seekto', null); set('seekforward', null); set('seekbackward', null);
   try { ms.metadata = new MediaMetadata({ title: L.piece.title, artist: 'Read Along · Listen' }); } catch {}
 }
+
+/* ---------------------------------------------------------------- online voices (Puter) */
+
+// Free natural voices (Amazon's, through Puter). Puter asks you to sign in once with a free
+// account; its free allowance pays for the voices. Needs internet.
+const ONLINE = [
+  ['Olivia', 'en-AU', 'generative', 'Australian woman'],
+  ['Amy', 'en-GB', 'generative', 'British woman'],
+  ['Brian', 'en-GB', 'neural', 'British man'],
+  ['Arthur', 'en-GB', 'neural', 'British man'],
+  ['Matthew', 'en-US', 'generative', 'American man'],
+  ['Ruth', 'en-US', 'generative', 'American woman'],
+];
+const P = { lib: null, signedIn: false, chain: Promise.resolve() };
+
+function pLib() {
+  if (!P.lib) {
+    P.lib = new Promise((ok, fail) => {
+      const s = document.createElement('script');
+      s.src = 'https://js.puter.com/v2/';
+      s.onload = () => { try { P.signedIn = puter.auth.isSignedIn(); } catch {} ok(window.puter); };
+      s.onerror = () => { P.lib = null; fail(new Error('Online voices need internet.')); };
+      document.head.appendChild(s);
+    });
+  }
+  return P.lib;
+}
+// Signing in opens Puter's own window, so it must start from a tap.
+function pSignIn() {
+  pLib().then((puter) => puter.auth.signIn()).then(() => {
+    P.signedIn = true; vlog('puter: signed in'); pStatus(); toast('Signed in. Tap a voice to hear it.');
+  }, (e) => { vlog('puter sign-in: ' + ((e && e.message) || e)); toast('Sign-in didn\'t finish. Tap Sign in to try again.'); });
+}
+function pStatus() {
+  const el = document.getElementById('pStat');
+  if (!el) return;
+  el.innerHTML = P.signedIn
+    ? `<p class="tip" style="margin:0 0 4px">Signed in to Puter. Tap a voice to hear it.</p>`
+    : `<p class="tip" style="margin:0 0 6px">Free: sign in once with a free Puter account (it opens Puter's page; choose <b>Continue</b>, then come back here).</p><div class="sendbar"><button class="primary" id="pGo">Sign in to Puter</button></div>`;
+  const go = el.querySelector('#pGo');
+  if (go) go.onclick = () => pSignIn();
+  if (!P.lib) pLib().then(() => { if (P.signedIn) pStatus(); }, () => {});
+}
+
+// One line of speech. Lines are made one after another (not all at once).
+function pMake(text, key) {
+  const [, lang, engine] = ONLINE.find((v) => v[0] === pref.get('lpvoice', 'Olivia')) || ONLINE[0];
+  const voice = pref.get('lpvoice', 'Olivia');
+  const job = P.chain.then(async () => {
+    if (key && !K.clips.has(key)) throw new Error('skipped');   // the reader moved on
+    const puter = await pLib();
+    const t0 = Date.now();
+    let a;
+    try { a = await puter.ai.txt2speech(text.slice(0, 2900), { provider: 'aws-polly', voice, engine, language: lang }); }
+    catch (e) {
+      // Not every voice has the newest engine: fall back to the neural one.
+      if (engine === 'generative') a = await puter.ai.txt2speech(text.slice(0, 2900), { provider: 'aws-polly', voice, engine: 'neural', language: lang });
+      else throw e;
+    }
+    vlog(`online #${key || 'sample'}: ${voice} in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    return { url: a.src, secs: 0 };
+  });
+  P.chain = job.catch(() => {});
+  return job.catch((e) => {
+    const msg = String((e && (e.message || e.error && e.error.message || e.code)) || e);
+    if (msg === 'skipped') throw e;
+    vlog('online error: ' + msg);
+    throw new Error(/fund|credit|limit|quota|usage/i.test(msg) ? 'Puter\'s free allowance is used up for now. Choose a phone voice (microphone button).' : msg);
+  });
+}
+if (onlineOn()) pLib().catch(() => {});

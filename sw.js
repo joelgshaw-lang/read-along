@@ -1,6 +1,6 @@
 // Keeps the reader working offline. Books themselves live in the page's own storage.
-const CACHE = 'readalong-v13';
-const FILES = ['./', 'index.html', 'app.js?v=13', 'listen.js?v=13', 'kokoro-worker.js?v=13', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'readalong-v14';
+const FILES = ['./', 'index.html', 'app.js?v=14', 'listen.js?v=14', 'kokoro-worker.js?v=14', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
