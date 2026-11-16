@@ -303,6 +303,8 @@ function showPiece(p) {
   updateTimes();
   scrollTo(0, 0);
   requestAnimationFrame(() => markSentence(true, true));
+  if (studioOn()) kLoad().catch(() => {});
+  setupListenMedia();
 }
 
 function markSentence(instant, force) {
@@ -343,20 +345,34 @@ function chosenVoice() {
   return list.sort((a, b) => rank(b) - rank(a))[0] || null;
 }
 function voiceSheet() {
-  const list = voices(), cur = chosenVoice();
+  const list = voices(), cur = studioOn() ? null : chosenVoice(), kv = pref.get('lkvoice', 'bm_george');
   const label = (v) => `${esc(v.name.replace(/\s*\((Enhanced|Premium)\)/i, ''))}<small>${esc(v.lang)}${quality(v) === 2 ? ' · Premium' : quality(v) === 1 ? ' · Enhanced' : ''}</small>`;
   list.sort((a, b) => quality(b) - quality(a) || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name));
   openSheet(`<h3>Voice</h3>
+    <p class="vhead">Studio voices <small>the same voices as your audiobooks</small></p>
+    <div id="kStat"></div>
+    ${STUDIO.map(([id, name, kind]) => `<button class="voice kv ${studioOn() && kv === id ? 'on' : ''}" data-k="${id}">${name}<small>${kind}</small></button>`).join('')}
+    <p class="vhead" style="margin-top:18px">Phone voices <small>instant, no download</small></p>
     ${list.length ? list.map((v) => `<button class="voice ${cur && v.voiceURI === cur.voiceURI ? 'on' : ''}" data-v="${esc(v.voiceURI)}">${label(v)}</button>`).join('') : '<p>No English voices found yet. Close this and try again in a moment.</p>'}
     <p class="tip"><b>Better voices, free:</b> on your iPhone open <b>Settings → Accessibility → Read & Speak (Spoken Content) → Voices → English</b>, pick a voice marked <b>Premium</b> or <b>Enhanced</b> and download it. Then close and reopen Read Along.</p>
     <div class="sendbar"><button id="vrCopy2">Copy voice check</button></div>`,
-  (s) => (s.querySelector('#vrCopy2').onclick = () => navigator.clipboard.writeText(voiceReport()).then(() => toast('Copied: paste it to Claude'), () => toast('Couldn\'t copy')),
-  s.querySelectorAll('.voice').forEach((b) => (b.onclick = () => {
-    pref.set('lvoice', b.dataset.v); L.plainVoice = false;
-    s.querySelectorAll('.voice').forEach((x) => x.classList.toggle('on', x === b));
-    if (L.playing) speakAt(L.cur, L.word);
-    else sample();
-  }))));
+  (s) => {
+    s.querySelector('#vrCopy2').onclick = () => navigator.clipboard.writeText(voiceReport()).then(() => toast('Copied: paste it to Claude'), () => toast('Couldn\'t copy'));
+    kStatus();
+    s.querySelectorAll('.voice').forEach((b) => (b.onclick = () => {
+      const studio = !!b.dataset.k;
+      unlockSpeech(); kUnlockAudio();
+      if (studio && K.state !== 'ready') { kLoad().catch(() => {}); if (K.state !== 'ready') return toast('Download the studio voices first'); }
+      const wasPlaying = L.playing, at = L.word;
+      if (wasPlaying) stopL();
+      pref.set('lengine', studio ? 'studio' : 'phone');
+      if (studio) pref.set('lkvoice', b.dataset.k); else { pref.set('lvoice', b.dataset.v); L.plainVoice = false; }
+      s.querySelectorAll('.voice').forEach((x) => x.classList.toggle('on', x === b));
+      updateLSpeed();
+      if (wasPlaying) speakAt(L.cur, at);
+      else if (studio) kSample(); else sample();
+    }));
+  });
 }
 function sample() {
   unlockSpeech();
@@ -405,6 +421,10 @@ function noSoundHelp(hadVoice) {
 /* ---------------------------------------------------------------- speaking */
 
 function speakAt(k, from = 0) {
+  if (studioOn()) return studioSpeak(k, from);
+  return phoneSpeak(k, from);
+}
+function phoneSpeak(k, from = 0) {
   if (!synth) return toast('This browser can\'t read aloud');
   const my = ++L.token;
   const wasBusy = synth.speaking || synth.pending;
@@ -448,11 +468,21 @@ function speakAt(k, from = 0) {
 }
 function stopL() {
   L.token++; L.playing = false;
-  if (synth) synth.cancel();
+  if (synth && (synth.speaking || synth.pending)) synth.cancel();
+  K.audio.pause();
   updatePlayL(); keepAwake(false);
 }
 function pauseL() { const at = L.word; stopL(); L.from = at; }
-function playL() { speakAt(L.cur, L.from); }
+function playL() {
+  // Studio voice paused part-way through a line: carry on from the same spot.
+  if (studioOn() && K.cur && K.cur.k === L.cur && K.audio.currentTime > 0 && !K.audio.ended && K.audio.getAttribute('src')) {
+    L.playing = true; K.cur.my = ++L.token;
+    K.audio.play().catch((e) => vlog('play failed: ' + e.message));
+    updatePlayL(); keepAwake(true); kTick();
+    return;
+  }
+  speakAt(L.cur, L.from);
+}
 function updatePlayL() {
   $('#lPlayIcon').setAttribute('href', L.playing ? '#i-pause' : '#i-play');
   $('#lPlay').setAttribute('aria-label', L.playing ? 'Pause' : 'Play');
@@ -500,12 +530,13 @@ addEventListener('wheel', lHandScroll, { passive: true });
 
 function updateLSpeed() { $('#lSpeed').textContent = (Math.round(pref.get('lrate', 1) * 100) / 100) + '×'; }
 $('#lSpeed').onclick = () => {
-  const r = pref.get('lrate', 1);
-  openSheet(`<h3>Speed</h3><div class="chips">${LSPEEDS.map((x) => `<button class="chip ${x === r ? 'on' : ''}" data-r="${x}">${x}×</button>`).join('')}</div>
-    <p class="tip">Phone voices go up to about 2×. For faster listening, the audiobooks in the Books tab go up to 4.5×.</p>`,
+  const r = pref.get('lrate', 1), speeds = studioOn() ? [...LSPEEDS, 2.5, 3] : LSPEEDS;
+  openSheet(`<h3>Speed</h3><div class="chips">${speeds.map((x) => `<button class="chip ${x === r ? 'on' : ''}" data-r="${x}">${x}×</button>`).join('')}</div>
+    <p class="tip">${studioOn() ? 'Studio voices go up to 3×.' : 'Phone voices go up to about 2×. Studio voices (microphone button) go up to 3×.'}</p>`,
   (s) => s.querySelectorAll('[data-r]').forEach((b) => (b.onclick = () => {
     pref.set('lrate', +b.dataset.r); updateLSpeed(); updateTimes(); closeSheet();
-    if (L.playing) speakAt(L.cur, L.word);
+    if (studioOn()) K.audio.playbackRate = +b.dataset.r;
+    else if (L.playing) speakAt(L.cur, L.word);
   })));
 };
 function setLSleep(mins) {
@@ -530,3 +561,238 @@ $('#lSetBtn').onclick = function lset() {
 };
 // Starting an audiobook stops the reading voice.
 audio.addEventListener('play', () => { if (L.playing) stopL(); });
+
+/* ---------------------------------------------------------------- studio voices */
+
+// The Kokoro voices from the audiobooks, made on the phone a sentence or two ahead of
+// where it's reading and played like an audiobook (so the lock screen and AirPods work).
+const STUDIO = [['bm_george', 'George', 'British man'], ['bf_emma', 'Emma', 'British woman'], ['bm_lewis', 'Lewis', 'British man'],
+  ['bf_isabella', 'Isabella', 'British woman'], ['bm_daniel', 'Daniel', 'British man'], ['af_heart', 'Heart', 'American woman'], ['am_michael', 'Michael', 'American man']];
+const AHEAD = 4;   // sentences made ahead of the voice
+const K = {
+  audio: $('#laudio'), worker: null, ready: null, state: pref.get('kHave', false) ? 'cached' : 'off',
+  pct: 0, device: null, err: '', clips: new Map(), queue: [], busy: false, seq: 0, waiters: new Map(), cur: null, raf: 0, unlocked: false,
+};
+function studioOn() { return pref.get('lengine', 'phone') === 'studio'; }
+const kVoice = () => pref.get('lkvoice', 'bm_george');
+
+async function kDevice() {
+  try { if (navigator.gpu && await navigator.gpu.requestAdapter()) return 'webgpu'; } catch {}
+  return 'wasm';
+}
+const kSize = (d) => (d === 'webgpu' ? 325 : 92);
+
+function kLoad() {
+  if (K.ready) return K.ready;
+  K.ready = (async () => {
+    K.device = await kDevice();
+    K.state = 'loading'; K.pct = 0; kStatus();
+    vlog(`studio: loading (${K.device})`);
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+    return new Promise((ok, fail) => {
+      const bad = (msg) => { K.state = 'error'; K.err = msg; K.ready = null; vlog('studio error: ' + msg); kStatus(); fail(new Error(msg)); };
+      try { K.worker = new Worker('kokoro-worker.js?v=12', { type: 'module' }); } catch (e) { return bad('this phone can\'t run studio voices (' + e.message + ')'); }
+      K.worker.onerror = (e) => bad(e.message || 'the voice didn\'t start');
+      K.worker.onmessage = (e) => {
+        const d = e.data;
+        if (d.type === 'progress') { K.pct = Math.min(99, Math.round((d.loaded / d.total) * 100)); kStatus(); }
+        else if (d.type === 'ready') { K.state = 'ready'; pref.set('kHave', true); vlog(`studio: ready in ${Math.round(d.ms / 1000)}s`); kStatus(); ok(); }
+        else if (d.type === 'audio' || d.type === 'error') {
+          if (d.type === 'error' && d.of === 'load') return bad(d.error);
+          const w = K.waiters.get(d.id); K.waiters.delete(d.id); K.busy = false;
+          if (w) d.type === 'audio' ? w.ok(d) : w.fail(new Error(d.error));
+          kPump();
+        }
+      };
+      K.worker.postMessage({ type: 'load', device: K.device });
+    });
+  })();
+  return K.ready;
+}
+
+// Show download / loading state in the voice sheet, and in the player while waiting.
+function kStatus() {
+  const el = document.getElementById('kStat');
+  if (el) {
+    const size = K.device ? kSize(K.device) : null;
+    el.innerHTML =
+      K.state === 'ready' ? `<p class="tip" style="margin:0 0 4px">Ready on this phone. Tap a voice to hear it.</p>`
+      : K.state === 'loading' ? `<p class="tip" style="margin:0 0 6px">${K.pct ? `Downloading… ${K.pct}%` : 'Getting the voices ready…'} Keep this open. It's only slow the first time.</p><div class="bar"><i style="width:${K.pct}%"></i></div>`
+      : K.state === 'error' ? `<p class="tip" style="margin:0 0 6px;color:#b2463c">Couldn't start the studio voices: ${esc(K.err)}</p><div class="sendbar"><button class="primary" id="kGo">Try again</button></div>`
+      : K.state === 'cached' ? `<div class="sendbar"><button class="primary" id="kGo">Turn on studio voices</button></div>`
+      : `<p class="tip" style="margin:0 0 6px">One-time download${size ? ` of about ${size} MB` : ''}, then they work offline. Use Wi-Fi.</p><div class="sendbar"><button class="primary" id="kGo">Download studio voices</button></div>`;
+    const go = el.querySelector('#kGo');
+    if (go) go.onclick = () => { kUnlockAudio(); kLoad().catch(() => {}); };
+    if (!K.device && K.state !== 'ready') kDevice().then((d) => { if (!K.device) { K.device = d; kStatus(); } });
+  }
+  if (L.playing && studioOn() && K.state === 'loading' && L.piece) $('#lLeft').textContent = K.pct ? `voice downloading ${K.pct}%` : 'getting the voice ready…';
+}
+
+// Ask the background voice maker for one sentence. One at a time, in order.
+function kMake(text, voice, key) {
+  return new Promise((ok, fail) => {
+    const id = ++K.seq;
+    K.waiters.set(id, { ok, fail });
+    K.queue.push({ id, text, voice, key });
+    kPump();
+  });
+}
+function kPump() {
+  if (K.busy || !K.queue.length || K.state !== 'ready') return;
+  const job = K.queue.shift();
+  K.busy = true;
+  K.worker.postMessage({ type: 'speak', id: job.id, text: job.text, voice: job.voice, device: K.device });
+}
+
+// The audio for sentence k (made once, kept while the piece is open).
+function kClip(k) {
+  const key = kVoice() + '|' + k;
+  if (!K.clips.has(key)) {
+    const text = L.sents[k].text.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+    const p = kLoad().then(() => kMake(text, kVoice(), key)).then((d) => {
+      vlog(`made #${k}: ${d.secs.toFixed(1)}s of voice in ${(d.ms / 1000).toFixed(1)}s`);
+      return { url: URL.createObjectURL(new Blob([d.wav], { type: 'audio/wav' })), secs: d.secs };
+    });
+    p.catch(() => { if (K.clips.get(key) === p) K.clips.delete(key); });
+    K.clips.set(key, p);
+  }
+  return K.clips.get(key);
+}
+function kAhead(k) {
+  for (let j = k; j < Math.min(L.sents.length, k + 1 + AHEAD); j++) if (/\w/.test(L.sents[j].text)) kClip(j);
+  // Let go of lines well behind the voice.
+  for (const [key, p] of K.clips) {
+    const j = +key.split('|')[1];
+    if (j < k - 3 || j > k + AHEAD + 6 || !key.startsWith(kVoice() + '|')) {
+      // Not started yet: drop it from the queue too.
+      K.clips.delete(key);
+      p.then((c) => URL.revokeObjectURL(c.url)).catch(() => {});
+    }
+  }
+}
+function kClearQueue() {
+  for (const job of K.queue) {
+    if (job.key) K.clips.delete(job.key);   // now, so the new spot asks for it afresh
+    const w = K.waiters.get(job.id); K.waiters.delete(job.id); if (w) w.fail(new Error('skipped'));
+  }
+  K.queue = [];
+}
+
+// iPhones only let a page play sound that starts during a tap: play a moment of silence
+// on the first tap, and the same player can then carry on by itself.
+function kUnlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+  if (K.unlocked) return;
+  K.unlocked = true;
+  const sr = 8000, n = 800, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
+  const w = (o, str) => [...str].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  K.audio.src = URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+  K.audio.play().then(() => vlog('player unlocked'), (e) => vlog('player unlock failed: ' + e.message));
+}
+
+// Where the voice is in a line: words weighted by length, with pauses at punctuation.
+function kWeights(text) {
+  const out = [], re = /\S+/g; let m, total = 0;
+  while ((m = re.exec(text))) {
+    const w = m[0].length + 2 + (/[.!?]["'”’)]*$/.test(m[0]) ? 8 : /[,;:—–]$/.test(m[0]) ? 4 : 0);
+    out.push({ at: m.index, from: total }); total += w;
+  }
+  out.forEach((x) => (x.from /= total || 1));
+  return out;
+}
+function kCharAt(k, frac) {
+  const ws = kWeights(L.sents[k].text);
+  let at = 0;
+  for (const x of ws) { if (x.from <= frac) at = x.at; else break; }
+  return at;
+}
+function kFracAt(k, ch) {
+  const ws = kWeights(L.sents[k].text);
+  let f = 0;
+  for (const x of ws) { if (x.at <= ch) f = x.from; else break; }
+  return f;
+}
+function kTick() {
+  cancelAnimationFrame(K.raf);
+  const step = () => {
+    if (!L.playing || !studioOn() || !K.cur || K.audio.paused) return;
+    const d = K.audio.duration || K.cur.secs;
+    if (d) showWord(K.cur.k, kCharAt(K.cur.k, K.audio.currentTime / d));
+    K.raf = requestAnimationFrame(step);
+  };
+  K.raf = requestAnimationFrame(step);
+}
+
+function studioSpeak(k, from = 0) {
+  const my = ++L.token;
+  if (synth && (synth.speaking || synth.pending)) synth.cancel();
+  K.audio.pause();
+  kUnlockAudio();
+  if (k >= L.sents.length) { stopL(); L.cur = L.sents.length - 1; toast('The end'); return; }
+  L.cur = k; L.from = from; L.word = from; L.playing = true;
+  pref.set('lpos:' + L.piece.id, k);
+  markSentence(false);
+  updatePlayL(); updateTimes(); keepAwake(true);
+  if (!/\w/.test(L.sents[k].text)) return void setTimeout(() => my === L.token && studioSpeak(k + 1), 0);
+  showWord(k, from);
+  if (K.cur && Math.abs(K.cur.k - k) > 1) kClearQueue();   // jumped: forget lines queued for the old spot
+  kAhead(k);
+  const waitMsg = setTimeout(() => { if (my === L.token) $('#lLeft').textContent = K.state === 'ready' ? 'making the voice…' : 'getting the voice ready…'; }, 500);
+  kClip(k).then((c) => {
+    clearTimeout(waitMsg);
+    if (my !== L.token) return;
+    K.cur = { k, secs: c.secs, my };
+    K.audio.src = c.url;
+    K.audio.playbackRate = pref.get('lrate', 1);
+    K.audio.preservesPitch = true;
+    const start = from ? kFracAt(k, from) * c.secs : 0;
+    const go = () => {
+      if (my !== L.token) return;
+      if (start) try { K.audio.currentTime = start; } catch {}
+      K.audio.play().then(() => { updateTimes(); kTick(); }, (e) => {
+        vlog('play blocked: ' + e.message);
+        stopL(); toast('Tap play to start the voice');
+      });
+    };
+    if (K.audio.readyState >= 1) go(); else K.audio.addEventListener('loadedmetadata', go, { once: true });
+  }, (e) => {
+    clearTimeout(waitMsg);
+    if (my !== L.token || e.message === 'skipped') return;
+    stopL(); updateTimes();
+    toast('Studio voice problem: ' + e.message);
+  });
+}
+K.audio.addEventListener('ended', () => {
+  if (!K.cur || K.cur.my !== L.token || !L.playing || !studioOn()) return;
+  const k = K.cur.k;
+  if (L.sleepAt && Date.now() >= L.sleepAt) { setLSleep(0); stopL(); L.cur = Math.min(k + 1, L.sents.length - 1); markSentence(false); toast('Sleep timer: stopped'); return; }
+  studioSpeak(k + 1);
+});
+K.audio.addEventListener('pause', () => cancelAnimationFrame(K.raf));
+
+// "Hello" in the chosen studio voice.
+function kSample() {
+  const my = ++L.token;
+  kUnlockAudio();
+  kLoad().then(() => kMake('Hello Joel. This is how I sound reading to you.', kVoice())).then((d) => {
+    if (my !== L.token) return;
+    K.cur = null;
+    K.audio.src = URL.createObjectURL(new Blob([d.wav], { type: 'audio/wav' }));
+    K.audio.playbackRate = 1;
+    K.audio.play().catch(() => {});
+  }, () => {});
+}
+
+// Lock screen and AirPods: play/pause, and next/previous for a sentence (studio voices).
+function setupListenMedia() {
+  if (!('mediaSession' in navigator)) return;
+  const ms = navigator.mediaSession, set = (a, fn) => { try { ms.setActionHandler(a, fn); } catch {} };
+  set('play', () => playL());
+  set('pause', () => pauseL());
+  set('nexttrack', () => $('#lNext').onclick());
+  set('previoustrack', () => $('#lPrev').onclick());
+  set('seekto', null); set('seekforward', null); set('seekbackward', null);
+  try { ms.metadata = new MediaMetadata({ title: L.piece.title, artist: 'Read Along · Listen' }); } catch {}
+}
