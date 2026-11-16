@@ -1,6 +1,6 @@
 // Keeps the reader working offline. Books themselves live in the page's own storage.
-const CACHE = 'readalong-v10';
-const FILES = ['./', 'index.html', 'app.js?v=10', 'listen.js?v=10', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'readalong-v11';
+const FILES = ['./', 'index.html', 'app.js?v=11', 'listen.js?v=11', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));

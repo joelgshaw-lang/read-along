@@ -74,7 +74,7 @@ $('#pasteBtn').onclick = () => openSheet(`<h3>Paste text</h3>
     if (!text.trim()) return toast('Paste some text first');
     unlockSpeech();   // must happen during the tap, or the iPhone keeps the voice silent
     closeSheet();
-    await savePiece(s.querySelector('#pTitle').value.trim(), textToParas(text), true);
+    savePiece(s.querySelector('#pTitle').value.trim(), textToParas(text), true);
   };
 });
 $('#openBtn').onclick = () => { unlockSpeech(); $('#lfile').click(); };
@@ -86,14 +86,15 @@ $('#lfile').onchange = async (e) => {
     const { title, paras } = await readFile(f);
     busy();
     if (!paras.length) throw new Error('No text found in that file (a scanned PDF is just pictures of pages).');
-    await savePiece(title, paras, true);
+    savePiece(title, paras, false);
+    toast('Tap play to start');
   } catch (err) {
     busy();
     alert('Couldn\'t read that file: ' + ((err && err.message) || err));
   }
 };
 
-async function savePiece(title, paras, autoplay) {
+function savePiece(title, paras, autoplay) {
   paras = paras.map((p) => ({ t: p.t.replace(/\s+/g, ' ').trim(), h: !!p.h })).filter((p) => p.t);
   if (!paras.length) return toast('No text to read');
   const words = paras.reduce((n, p) => n + p.t.split(' ').length, 0);
@@ -101,9 +102,9 @@ async function savePiece(title, paras, autoplay) {
   const first = paras.find((p) => !p.h) || paras[0];
   title = title || first.t.split(/(?<=[.!?])\s/)[0].slice(0, 60);
   const piece = { id: newId(), title, paras, words, sents, added: Date.now() };
-  await put('pieces', piece);
-  await openPiece(piece.id);
-  if (autoplay) speakAt(0);   // start reading straight away
+  showPiece(piece);
+  if (autoplay) speakAt(0);   // start reading straight away, while the tap is still happening
+  put('pieces', piece).catch(() => toast('Couldn\'t save this one on the phone'));
 }
 
 // Plain text: blank lines split paragraphs; with no blank lines, every line is one.
@@ -270,9 +271,13 @@ function splitSentences(text) {
 }
 
 async function openPiece(id) {
-  if (!audio.paused) audio.pause();
   const p = await get('pieces', id);
   if (!p) return listPieces();
+  showPiece(p);
+}
+function showPiece(p) {
+  const id = p.id;
+  if (!audio.paused) audio.pause();
   L.piece = p;
   pref.set('lopened:' + id, Date.now());
   pref.set('last', null);   // reopen the app at the list, not inside a book
@@ -371,8 +376,7 @@ function unlockSpeech() {
   try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
   if (!synth || L.unlocked) return;
   L.unlocked = true;
-  try { const u = new SpeechSynthesisUtterance(''); u.volume = 0; synth.speak(u); } catch {}
-  vlog('unlocked');
+  vlog('tap');
 }
 
 // Voice check: what happened the last few times it tried to speak.
@@ -383,7 +387,7 @@ function voiceReport() {
   return `Read Along ${VERSION} · Listen\n${navigator.userAgent}\nVoices: ${all.length} (${voices().length} English) · chosen: ${v ? v.name + ' ' + v.lang + (v.localService ? ' on-phone' : ' online') : 'phone default'}\nSound channel: ${navigator.audioSession ? navigator.audioSession.type : 'n/a'}\n` + vlogLines.join('\n');
 }
 // Nothing heard: say what to check.
-function noSoundHelp() {
+function noSoundHelp(hadVoice) {
   openSheet(`<h3>No sound?</h3>
     <p>The phone didn't start speaking. Check these:</p>
     <p>1. <b>Ring/Silent switch</b> on the side of the iPhone: switch it to Ring (no orange showing). Spoken text follows that switch.</p>
@@ -393,7 +397,8 @@ function noSoundHelp() {
     <div class="sendbar"><button id="vrCopy">Copy voice check</button><button class="primary" id="vrTry">Try again</button></div>`,
   (s) => {
     s.querySelector('#vrCopy').onclick = () => navigator.clipboard.writeText(voiceReport()).then(() => toast('Copied: paste it to Claude'), () => toast('Couldn\'t copy'));
-    s.querySelector('#vrTry').onclick = () => { closeSheet(); unlockSpeech(); speakAt(L.cur, L.from); };
+    // Second try uses the phone's own default voice (the chosen one may not be downloaded).
+    s.querySelector('#vrTry').onclick = () => { if (hadVoice) L.plainVoice = true; closeSheet(); unlockSpeech(); speakAt(L.cur, L.from); };
   });
 }
 
@@ -423,8 +428,7 @@ function speakAt(k, from = 0) {
   setTimeout(() => {
     if (started || my !== L.token || !L.playing) return;
     vlog(`no start after 3s (voice ${v ? v.name : 'default'}, speaking=${synth.speaking}, pending=${synth.pending})`);
-    if (v && !L.plainVoice) { L.plainVoice = true; vlog('retrying with the phone default voice'); speakAt(k, from); return; }
-    stopL(); L.from = from; noSoundHelp();
+    stopL(); L.from = from; noSoundHelp(!!v);
   }, 3000);
   u.onboundary = (e) => { started = true; if (my === L.token && (!e.name || e.name === 'word')) showWord(k, from + e.charIndex); };
   u.onend = () => {
@@ -438,7 +442,9 @@ function speakAt(k, from = 0) {
     stopL(); toast('The voice stopped (' + e.error + '). Tap play to carry on.');
   };
   // iPhones sometimes drop a new line spoken the instant the old one was stopped.
-  if (wasBusy) setTimeout(() => my === L.token && synth.speak(u), 120); else synth.speak(u);
+  // Speak straight away, never after a delay: an iPhone only allows it while the tap is happening.
+  synth.speak(u);
+  vlog(`speak #${k}${wasBusy ? ' (after stop)' : ''}${v ? ' ' + v.name : ''}`);
 }
 function stopL() {
   L.token++; L.playing = false;
