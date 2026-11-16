@@ -72,11 +72,12 @@ $('#pasteBtn').onclick = () => openSheet(`<h3>Paste text</h3>
   s.querySelector('#pGo').onclick = async () => {
     const text = s.querySelector('#pText').value;
     if (!text.trim()) return toast('Paste some text first');
+    unlockSpeech();   // must happen during the tap, or the iPhone keeps the voice silent
     closeSheet();
-    await savePiece(s.querySelector('#pTitle').value.trim(), textToParas(text));
+    await savePiece(s.querySelector('#pTitle').value.trim(), textToParas(text), true);
   };
 });
-$('#openBtn').onclick = () => $('#lfile').click();
+$('#openBtn').onclick = () => { unlockSpeech(); $('#lfile').click(); };
 $('#lfile').onchange = async (e) => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
@@ -85,14 +86,14 @@ $('#lfile').onchange = async (e) => {
     const { title, paras } = await readFile(f);
     busy();
     if (!paras.length) throw new Error('No text found in that file (a scanned PDF is just pictures of pages).');
-    await savePiece(title, paras);
+    await savePiece(title, paras, true);
   } catch (err) {
     busy();
     alert('Couldn\'t read that file: ' + ((err && err.message) || err));
   }
 };
 
-async function savePiece(title, paras) {
+async function savePiece(title, paras, autoplay) {
   paras = paras.map((p) => ({ t: p.t.replace(/\s+/g, ' ').trim(), h: !!p.h })).filter((p) => p.t);
   if (!paras.length) return toast('No text to read');
   const words = paras.reduce((n, p) => n + p.t.split(' ').length, 0);
@@ -101,7 +102,8 @@ async function savePiece(title, paras) {
   title = title || first.t.split(/(?<=[.!?])\s/)[0].slice(0, 60);
   const piece = { id: newId(), title, paras, words, sents, added: Date.now() };
   await put('pieces', piece);
-  openPiece(piece.id);
+  await openPiece(piece.id);
+  if (autoplay) speakAt(0);   // start reading straight away
 }
 
 // Plain text: blank lines split paragraphs; with no blank lines, every line is one.
@@ -341,16 +343,19 @@ function voiceSheet() {
   list.sort((a, b) => quality(b) - quality(a) || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name));
   openSheet(`<h3>Voice</h3>
     ${list.length ? list.map((v) => `<button class="voice ${cur && v.voiceURI === cur.voiceURI ? 'on' : ''}" data-v="${esc(v.voiceURI)}">${label(v)}</button>`).join('') : '<p>No English voices found yet. Close this and try again in a moment.</p>'}
-    <p class="tip"><b>Better voices, free:</b> on your iPhone open <b>Settings → Accessibility → Read & Speak (Spoken Content) → Voices → English</b>, pick a voice marked <b>Premium</b> or <b>Enhanced</b> and download it. Then close and reopen Read Along.</p>`,
-  (s) => s.querySelectorAll('.voice').forEach((b) => (b.onclick = () => {
-    pref.set('lvoice', b.dataset.v);
+    <p class="tip"><b>Better voices, free:</b> on your iPhone open <b>Settings → Accessibility → Read & Speak (Spoken Content) → Voices → English</b>, pick a voice marked <b>Premium</b> or <b>Enhanced</b> and download it. Then close and reopen Read Along.</p>
+    <div class="sendbar"><button id="vrCopy2">Copy voice check</button></div>`,
+  (s) => (s.querySelector('#vrCopy2').onclick = () => navigator.clipboard.writeText(voiceReport()).then(() => toast('Copied: paste it to Claude'), () => toast('Couldn\'t copy')),
+  s.querySelectorAll('.voice').forEach((b) => (b.onclick = () => {
+    pref.set('lvoice', b.dataset.v); L.plainVoice = false;
     s.querySelectorAll('.voice').forEach((x) => x.classList.toggle('on', x === b));
     if (L.playing) speakAt(L.cur, L.word);
     else sample();
-  })));
+  }))));
 }
 function sample() {
-  synth.cancel();
+  unlockSpeech();
+  if (synth.speaking || synth.pending) synth.cancel();
   const u = new SpeechSynthesisUtterance('Hello Joel. This is how I sound reading to you.');
   const v = chosenVoice(); if (v) { u.voice = v; u.lang = v.lang; }
   u.rate = pref.get('lrate', 1);
@@ -359,13 +364,46 @@ function sample() {
 }
 if (synth) synth.onvoiceschanged = () => {};   // iPhones load the voice list late; asking keeps it warm
 
+// iPhones only let a page speak if its first words start during a tap. Speaking nothing
+// during the first tap "unlocks" the voice for the rest of the visit. Also ask for the
+// media sound channel, so the Ring/Silent switch doesn't mute it (iOS 17+).
+function unlockSpeech() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+  if (!synth || L.unlocked) return;
+  L.unlocked = true;
+  try { const u = new SpeechSynthesisUtterance(''); u.volume = 0; synth.speak(u); } catch {}
+  vlog('unlocked');
+}
+
+// Voice check: what happened the last few times it tried to speak.
+const vlogLines = [];
+function vlog(msg) { vlogLines.push(new Date().toLocaleTimeString() + ' ' + msg); if (vlogLines.length > 60) vlogLines.shift(); }
+function voiceReport() {
+  const v = chosenVoice(), all = synth ? synth.getVoices() : [];
+  return `Read Along ${VERSION} · Listen\n${navigator.userAgent}\nVoices: ${all.length} (${voices().length} English) · chosen: ${v ? v.name + ' ' + v.lang + (v.localService ? ' on-phone' : ' online') : 'phone default'}\nSound channel: ${navigator.audioSession ? navigator.audioSession.type : 'n/a'}\n` + vlogLines.join('\n');
+}
+// Nothing heard: say what to check.
+function noSoundHelp() {
+  openSheet(`<h3>No sound?</h3>
+    <p>The phone didn't start speaking. Check these:</p>
+    <p>1. <b>Ring/Silent switch</b> on the side of the iPhone: switch it to Ring (no orange showing). Spoken text follows that switch.</p>
+    <p>2. <b>Volume up</b> while it's trying to read.</p>
+    <p>3. Tap the <b>microphone</b> button (top right) and choose a different voice.</p>
+    <p>4. Close Read Along fully (swipe it away) and open it again.</p>
+    <div class="sendbar"><button id="vrCopy">Copy voice check</button><button class="primary" id="vrTry">Try again</button></div>`,
+  (s) => {
+    s.querySelector('#vrCopy').onclick = () => navigator.clipboard.writeText(voiceReport()).then(() => toast('Copied: paste it to Claude'), () => toast('Couldn\'t copy'));
+    s.querySelector('#vrTry').onclick = () => { closeSheet(); unlockSpeech(); speakAt(L.cur, L.from); };
+  });
+}
+
 /* ---------------------------------------------------------------- speaking */
 
 function speakAt(k, from = 0) {
   if (!synth) return toast('This browser can\'t read aloud');
   const my = ++L.token;
   const wasBusy = synth.speaking || synth.pending;
-  synth.cancel();
+  if (wasBusy) synth.cancel();   // Safari can drop a line spoken straight after an unneeded cancel
   if (k >= L.sents.length) { stopL(); L.cur = L.sents.length - 1; toast('The end'); return; }
   L.cur = k; L.from = from; L.word = from; L.playing = true;
   pref.set('lpos:' + L.piece.id, k);
@@ -375,10 +413,20 @@ function speakAt(k, from = 0) {
   const text = s.text.slice(from);
   if (!/\w/.test(text)) return void setTimeout(() => my === L.token && speakAt(k + 1), 0);
   const u = new SpeechSynthesisUtterance(text);
-  const v = chosenVoice(); if (v) { u.voice = v; u.lang = v.lang; }
+  const v = L.plainVoice ? null : chosenVoice();
+  if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-AU';
   u.rate = pref.get('lrate', 1);
   showWord(k, from);
-  u.onboundary = (e) => { if (my === L.token && (!e.name || e.name === 'word')) showWord(k, from + e.charIndex); };
+  let started = false;
+  u.onstart = () => { started = true; if (!L.heard) { L.heard = true; vlog(`speaking with ${v ? v.name : 'phone default'}`); } };
+  // Watchdog: if the phone hasn't started within 3 seconds, try its default voice, then ask.
+  setTimeout(() => {
+    if (started || my !== L.token || !L.playing) return;
+    vlog(`no start after 3s (voice ${v ? v.name : 'default'}, speaking=${synth.speaking}, pending=${synth.pending})`);
+    if (v && !L.plainVoice) { L.plainVoice = true; vlog('retrying with the phone default voice'); speakAt(k, from); return; }
+    stopL(); L.from = from; noSoundHelp();
+  }, 3000);
+  u.onboundary = (e) => { started = true; if (my === L.token && (!e.name || e.name === 'word')) showWord(k, from + e.charIndex); };
   u.onend = () => {
     if (my !== L.token) return;
     if (L.sleepAt && Date.now() >= L.sleepAt) { setLSleep(0); stopL(); L.cur = Math.min(k + 1, L.sents.length - 1); markSentence(false); toast('Sleep timer: stopped'); return; }
@@ -386,6 +434,7 @@ function speakAt(k, from = 0) {
   };
   u.onerror = (e) => {
     if (my !== L.token || e.error === 'interrupted' || e.error === 'canceled') return;
+    vlog('error: ' + e.error);
     stopL(); toast('The voice stopped (' + e.error + '). Tap play to carry on.');
   };
   // iPhones sometimes drop a new line spoken the instant the old one was stopped.
@@ -422,7 +471,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && L.
 
 /* ---------------------------------------------------------------- controls */
 
-$('#lPlay').onclick = () => (L.playing ? pauseL() : playL());
+$('#lPlay').onclick = () => { unlockSpeech(); L.playing ? pauseL() : playL(); };
 $('#lPrev').onclick = () => {
   L.lastScroll = 0;
   // Well into a sentence: start it again. At its start: go to the one before.
@@ -437,7 +486,7 @@ $('#ltext').addEventListener('click', (e) => {
   const sel = getSelection();
   if (sel && !sel.isCollapsed) return;
   const el = e.target.closest('.s');
-  if (el) { L.lastScroll = 0; speakAt(+el.dataset.k); }
+  if (el) { unlockSpeech(); L.lastScroll = 0; speakAt(+el.dataset.k); }
 });
 const lHandScroll = () => { if (!$('#listen').classList.contains('hidden')) L.lastScroll = Date.now(); };
 addEventListener('touchmove', lHandScroll, { passive: true });
